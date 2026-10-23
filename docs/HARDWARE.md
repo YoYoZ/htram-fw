@@ -81,9 +81,20 @@ Inside `at_customize`:
 Nothing about the cloud service, the protocol or the sensor lives on the ESP32:
 all of that is in the GD32.
 
+## Main board facts learned over the protocol
+
+- Firmware **V1.00**.
+- **No clock battery:** the clock restarts at 2021-01-01 whenever power is lost.
+- A **one-minute history log** in a 1 MB ring buffer of the Winbond flash
+  (`0x200000`–`0x2fffff`), written in 16-record batches. See
+  [PROTOCOL.md](PROTOCOL.md#history-log-verified).
+- Activity thresholds, display-off time, alarm sound and °C/°F are stored on
+  the main board and survive power loss.
+
 ## Not yet explored
 
 - The GD32's SWD port (likely the 5 edge pads near the pogo contacts) and
   whether its readout protection is enabled.
-- The Winbond flash contents.
+- The rest of the Winbond flash (display graphics, presumably).
 - The CO2 sensor's part number and interface.
+- The main board's BLE firmware-upgrade path.

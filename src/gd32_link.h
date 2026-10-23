@@ -52,4 +52,17 @@ String device_name();
 // True once the GD32 has finished its boot sequence and accepted our client.
 bool online();
 
+// Builds a device frame: 7b 41 00 <len> <cmd> <payload> <crc16> 7d. `out` needs
+// room for n + 9 bytes. Returns the frame length.
+size_t build_frame(uint16_t cmd, const uint8_t *payload, size_t n, uint8_t *out);
+
+// True if `f` is a well-formed frame with a valid CRC.
+bool frame_ok(const uint8_t *f, size_t n);
+
+// Sends a frame to the GD32 as a client write, between the regular readings,
+// and waits for the reply whose command is the request's plus 0x0100. Returns
+// the reply's length, or 0 on timeout or while the link is down. Blocks the
+// calling task; safe from any task except the link's own.
+size_t transact(const uint8_t *req, size_t n, uint8_t *reply, size_t cap, uint32_t timeout_ms = 1500);
+
 }  // namespace gd32

@@ -91,7 +91,7 @@ static uint32_t last_command_at = 0;
 static int32_t since(uint32_t then) { return (int32_t)(millis() - then); }
 
 static String line;              // AT command being collected
-static uint8_t frame[64];        // notification payload being collected
+static uint8_t frame[256];       // notification payload being collected (up to MTU 247)
 static size_t frame_want = 0;    // bytes the GD32 said it would send
 static size_t frame_got = 0;
 static uint32_t frame_since = 0;
@@ -100,6 +100,19 @@ static Reading current;        // guarded by reading_lock; HomeKit reads it from
 static portMUX_TYPE reading_lock = portMUX_INITIALIZER_UNLOCKED;
 static LinkStats counters;
 static char advertised_name[40] = "";  // guarded by reading_lock
+
+// One request at a time from other tasks (settings, history, the raw API):
+// the caller fills the slot, the link task sends it between readings and hands
+// back the reply whose command is the request's plus 0x0100.
+static SemaphoreHandle_t transact_mutex;  // serialises callers
+static SemaphoreHandle_t transact_done;   // given by the link task when the reply lands
+static volatile bool tx_pending = false;  // slot filled, not yet sent
+static volatile bool tx_sent = false;     // sent, waiting for the reply
+static uint8_t tx_frame[256];
+static size_t tx_len = 0;
+static uint16_t tx_expect = 0;
+static uint8_t rx_frame[256];
+static size_t rx_len = 0;
 
 static void send(const char *s) { AT.print(s); }
 
@@ -145,11 +158,15 @@ static void report_client_subscribed() {
   last_resubscribe = millis();
 }
 
-// Hands the GD32 a request frame as if the client had written it.
-static void request_reading() {
-  AT.printf("\r\n+WRITE:0,2,2,,%u,", (unsigned)sizeof(READ_REQUEST));
-  AT.write(READ_REQUEST, sizeof(READ_REQUEST));
+// Hands the GD32 a frame as if the client had written it to Write-Data.
+static void client_write(const uint8_t *f, size_t n) {
+  AT.printf("\r\n+WRITE:0,2,2,,%u,", (unsigned)n);
+  AT.write(f, n);
   AT.print("\r\n");
+}
+
+static void request_reading() {
+  client_write(READ_REQUEST, sizeof(READ_REQUEST));
   counters.requests++;
 }
 
@@ -167,7 +184,15 @@ static void parse_frame(const uint8_t *f, size_t n) {
     return;
   }
   uint16_t cmd = ((uint16_t)f[4] << 8) | f[5];
-  if (cmd != CMD_READING || n < 16) return;  // some other reply; nothing to do
+  last_reply = millis();  // any well-formed frame proves the link is alive
+
+  if (tx_sent && cmd == tx_expect) {
+    memcpy(rx_frame, f, n);
+    rx_len = n;
+    tx_sent = false;
+    xSemaphoreGive(transact_done);
+  }
+  if (cmd != CMD_READING || n < 16) return;  // not a reading
 
   counters.replies++;
 
@@ -184,7 +209,6 @@ static void parse_frame(const uint8_t *f, size_t n) {
   portENTER_CRITICAL(&reading_lock);
   current = r;
   portEXIT_CRITICAL(&reading_lock);
-  last_reply = millis();
 }
 
 // ---------------------------------------------------------------------------
@@ -280,9 +304,53 @@ void begin() {
   AT.setHwFlowCtrlMode(UART_HW_FLOWCTRL_RTS, 64);
 #endif
   line.reserve(128);
+  transact_mutex = xSemaphoreCreateMutex();
+  transact_done = xSemaphoreCreateBinary();
   delay(100);
   announce_ready();
   xTaskCreatePinnedToCore(link_task, "gd32", 4096, nullptr, 2, nullptr, 1);
+}
+
+size_t build_frame(uint16_t cmd, const uint8_t *payload, size_t n, uint8_t *out) {
+  size_t len = 6 + n + 3;
+  out[0] = 0x7b;
+  out[1] = 0x41;
+  out[2] = 0x00;
+  out[3] = (uint8_t)(len - 4);
+  out[4] = cmd >> 8;
+  out[5] = cmd & 0xff;
+  memcpy(out + 6, payload, n);
+  uint16_t c = crc16(out, 6 + n);
+  out[6 + n] = c >> 8;
+  out[7 + n] = c & 0xff;
+  out[8 + n] = 0x7d;
+  return len;
+}
+
+bool frame_ok(const uint8_t *f, size_t n) {
+  return n >= 10 && f[0] == 0x7b && f[n - 1] == 0x7d &&
+         crc16(f, n - 3) == (((uint16_t)f[n - 3] << 8) | f[n - 2]);
+}
+
+size_t transact(const uint8_t *req, size_t n, uint8_t *reply, size_t cap, uint32_t timeout_ms) {
+  if (!online() || n < 10 || n > sizeof(tx_frame)) return 0;
+  if (xSemaphoreTake(transact_mutex, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return 0;
+
+  xSemaphoreTake(transact_done, 0);  // drop a reply that arrived after an earlier timeout
+  memcpy(tx_frame, req, n);
+  tx_len = n;
+  tx_expect = ((((uint16_t)req[4] << 8) | req[5]) + 0x0100);
+  tx_sent = false;
+  tx_pending = true;
+
+  size_t got = 0;
+  if (xSemaphoreTake(transact_done, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
+    got = min(rx_len, cap);
+    memcpy(reply, rx_frame, got);
+  }
+  tx_pending = tx_sent = false;
+  xSemaphoreGive(transact_mutex);
+  return got;
 }
 
 }  // namespace gd32
@@ -338,6 +406,12 @@ static void service() {
   if (phase == PHASE_PAIRING && pair_at && since(pair_at) >= 0) {
     pair_at = 0;
     report_client_subscribed();
+  }
+
+  if (phase == PHASE_READY && tx_pending && !frame_want) {
+    tx_pending = false;
+    tx_sent = true;
+    client_write(tx_frame, tx_len);
   }
 
   if (phase == PHASE_READY && since(next_poll) >= 0) {

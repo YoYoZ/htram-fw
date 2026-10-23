@@ -120,16 +120,84 @@ Offsets as the app parses them: bytes 7–8, 9, 10, 11, 12.
 | `7b 41 00 07 74 58 01 00 67 84 7d` | back to Bluetooth mode |
 | `7b 41 00 06 74 00 02 fa 6b 7d` | network status; reply byte 7: `0` idle, `2` connecting, `3` connected, `4` failed |
 
+### Device information (verified)
+
+Payload is shown after the command bytes; reply = command + `0x0100`.
+
+| Request | Reply payload | Meaning |
+| --- | --- | --- |
+| `2020` `03` | `03` + ASCII | serial number, e.g. `RM12xxxxxxxx` |
+| `2021` `01` | `01 06 51 00 00` | SKU code (meaning unknown) |
+| `2023` `01` | `01` + ASCII `V1.00 ` | main board firmware version |
+| `2401` `01` | `01` | heartbeat |
+
+### Settings (verified)
+
+| Request | Reply | Meaning |
+| --- | --- | --- |
+| `4043` `04 00 60 06` | `04 YY YY RR RR SS SS` | yellow ppm, red ppm, display-off seconds (0 = always on) |
+| `4243` `04 00 40 06 YY YY RR RR 00 TT` | `04` | set thresholds and activity type |
+| `4243` `04 00 20 00 SS SS` | `04` | set display-off seconds (the app used 120 or 0) |
+| `2623` `01 00` | `01 00 00 SS` | alarm sound, `SS` = 1 on / 0 off |
+| `2643` `01 00 00 SS` | `01` | set alarm sound |
+| `206e` `02 06` | `02 UU` | display unit, `UU` = 0 °C / 1 °F |
+| `2232` `02 06 UU` | `02` | set display unit |
+
+All values are big-endian. Activity type `TT`: 1 custom, 2 low, 3 medium,
+4 high. The device does not report the type back; the app — and htram-fw —
+infer it from the threshold pair:
+
+| Activity | App's examples | Yellow | Red |
+| --- | --- | --- | --- |
+| Low | classrooms, libraries, cinemas | 800 | 1100 |
+| Medium | restaurants, bars, offices, clinics | 700 | 1000 |
+| High | gyms, choirs, recreation centres | 500 | 800 |
+| Custom | yellow 500–1100, red ≥ yellow + 100, up to 2000 | | |
+
+This table *is* the device's "transmission risk": the traffic light and buzzer
+compare the CO2 reading against the thresholds for the room's activity. There
+is no other risk calculation, on the device or in the app.
+
+### Clock (verified)
+
+`2242` `01 YY MM DD hh mm ss` → `01`. UTC, one binary byte per field
+(2026 → `1a`). **The main board has no clock battery: its clock restarts at
+2021-01-01 00:00 whenever it loses power** and stays wrong until set. The app
+set it on every connection; htram-fw sets it whenever the link comes up and
+every 6 hours.
+
+### History log (verified)
+
+The device logs one record per minute to a 1 MB ring buffer in its SPI flash,
+`0x200000`–`0x2fffff` on our unit (8192 packets, ~130 000 records, ~90 days).
+
+`2093` `01 AA AA AA AA` reads the 128-byte packet at address `A`. Reply
+`2193` `01 NN NN NN NN` + up to 16 records, where `N` is the next address
+(wrapping from the top of the ring to its bottom). Each record is 8 bytes:
+
+```
+TT TT TT TT  CC CC  tt  hh
+└── time ──┘ └co2┘  │   └─ humidity, %
+  UTC secs    ppm   └──── temperature, °C, signed
+```
+
+- Address `ff ff ff ff` returns no records and points at the **oldest** packet.
+  The newest sits just before it, past the wrap; the sector ahead of the write
+  position is kept erased (reads as all `ff`).
+- Records reach flash in **batches of 16** — the newest stored record can be up
+  to 16 minutes old.
+- Timestamps written before a clock sync (after a power loss) start from
+  2021-01-01 and are only meaningful relative to each other.
+
 ### Seen in the app, not tested
 
 | Command | Purpose |
 | --- | --- |
 | `7460` | Wi-Fi credentials: 22 zero bytes, password length + password padded to 64, SSID padded to 33, 33 zero bytes |
 | `20b0` | cloud MQTT URL, AES key and IV (two variants, chosen by device SKU) |
-| `4143` | alarm / alert thresholds |
-| `2120`, `2121`, `2123`, `216e` | SKU, firmware version and related queries |
-| `2193` | history log |
+| firmware upgrade | over BLE, via the standard `2b05`/`2b06` characteristics — not explored |
 
 In Wi-Fi mode the stock firmware publishes readings to whatever MQTT broker
 the app configured, encrypted with the key it was given — the cloud address is
-not built into the device.
+not built into the device. The app's cloud (`airmonitoring.honeywell.com`)
+also tied Wi-Fi to a paid licence from the distributor.

@@ -47,6 +47,17 @@ python tools/htram_reset.py COM19 run
 If a flash is interrupted after the bootloader region was erased, the module
 will not boot — but download mode lives in mask ROM, so just flash again.
 
+## Partition table
+
+htram-fw uses the `min_spiffs` table: two 1.875 MB app slots, so OTA updates
+have room to grow. `nvs` (Wi-Fi credentials, HomeKit pairing) and `otadata`
+sit at the same addresses as in the default table, so switching keeps your
+settings and pairing.
+
+The table can only be changed over UART. A unit first flashed with the default
+table keeps working and keeps accepting OTA updates while the image fits its
+1.25 MB slots; to switch, repeat the [first flash](#first-flash) once.
+
 ## Later: over Wi-Fi
 
 ```bash

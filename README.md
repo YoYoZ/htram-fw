@@ -12,12 +12,20 @@ the readings on your network:
 $ curl http://htram.local/api/data
 {"online":true,"valid":true,"warming_up":false,"co2":1200,"temperature":21,
  "humidity":57,"battery":4,"battery_percent":100,"charging":false,
- "age_seconds":2,"uptime_seconds":431}
+ "age_seconds":2,"level":"yellow","activity":"low","yellow_ppm":800,
+ "red_ppm":1100,"uptime_seconds":431}
 ```
 
-- **Apple Home**, natively — CO2 (with a "CO2 detected" alert), temperature,
-  humidity and battery. No Homebridge needed.
-- **JSON API**, **Prometheus metrics** and a status page.
+- **Apple Home**, natively — CO2 (with a "CO2 detected" alert that matches the
+  device's yellow light), temperature, humidity, battery, and switches for the
+  alarm sound and display. No Homebridge needed.
+- **Everything the retired app could do:** the "transmission risk" level,
+  activity presets and custom thresholds, display auto-off, alarm sound, °C/°F,
+  and the device's **built-in history log** (one record per minute, ~90 days).
+- **Clock sync** from network time — the device has no clock battery and loses
+  the time on every power loss.
+- **JSON API**, **CSV history export**, **Prometheus metrics**, a status page
+  with a 24-hour chart, and a settings page.
 - **Over-the-air updates** after the first flash.
 - No cloud, no account, no MQTT.
 
@@ -61,23 +69,66 @@ backup restores the original firmware at any time.
 
 | Path | |
 | --- | --- |
-| `/api/data` | JSON reading, CORS-enabled |
-| `/metrics` | Prometheus text format |
-| `/` | status page, with the Apple Home setup code |
+| `GET /api/data` | current reading and risk level, CORS-enabled |
+| `GET /api/settings` | the device's settings; `POST` to change them |
+| `GET /api/history?minutes=1440` | the device's own log, JSON; add `&format=csv` |
+| `GET /metrics` | Prometheus text format |
+| `/` | status page with a 24 h chart and the Apple Home setup code |
+| `/settings` | device settings form |
 | `/setup` | change Wi-Fi credentials |
+| `GET /api/raw?cmd=2021&payload=01` | send any protocol frame (developer aid) |
 
 `co2` is `null` while the sensor warms up after power-on. `battery` is 0–4
-bars, as on the device.
+bars, as on the device. `level` is the device's own traffic light: `green`,
+`yellow` or `red` under the thresholds of the selected activity level.
+
+### The "transmission risk"
+
+There is no hidden calculation: the monitor compares CO2 against thresholds
+that depend on how active the room is. More people breathing harder means CO2
+signals shared air sooner, so the alarm comes earlier.
+
+| Activity | Examples | Yellow | Red |
+| --- | --- | --- | --- |
+| `low` | classrooms, libraries, cinemas | 800 ppm | 1100 ppm |
+| `medium` | restaurants, offices, clinics | 700 ppm | 1000 ppm |
+| `high` | gyms, choirs, recreation centres | 500 ppm | 800 ppm |
+| `custom` | your own | 500–1100 | ≥ yellow + 100, up to 2000 |
+
+### Changing settings
+
+```bash
+curl -X POST http://htram.local/api/settings -d activity=medium
+curl -X POST http://htram.local/api/settings -d "yellow=900&red=1300"   # custom
+curl -X POST http://htram.local/api/settings -d screen_off=120          # 0 = always on
+curl -X POST http://htram.local/api/settings -d alarm_sound=0
+curl -X POST http://htram.local/api/settings -d unit=F
+```
+
+### History
+
+```bash
+curl "http://htram.local/api/history?minutes=1440&format=csv" > today.csv
+```
+
+One record per minute, read straight from the device's flash (about 5 s per
+day, up to 7 days per request). The device writes records in batches of 16, so
+the newest can be up to 16 minutes old — `/api/data` has the live value. Each
+record has a `time_trusted` flag: timestamps from before the clock was synced
+after a power loss start at 2021-01-01 and are only right relative to each
+other.
 
 ## Apple Home
 
 In the Home app: **Add Accessory → More options**, pick *HTRAM CO2 Monitor*,
 enter the setup code from the status page.
 
-- **CO2 sensor** — ppm, peak, and *CO2 detected* above 1000 ppm (where the
-  device turns yellow; clears below 900). Change it with
-  `-DHTRAM_CO2_ALERT_PPM=1200`.
+- **CO2 sensor** — ppm, peak, and *CO2 detected* from the device's yellow
+  threshold for its activity level (clears 100 ppm below). Force a fixed level
+  with `-DHTRAM_CO2_ALERT_PPM=1200`.
 - **Temperature**, **humidity**, **battery** (level, charging, low).
+- **Alarm Sound** and **Display Auto-Off** switches, kept in step with the
+  device and the web settings.
 - A **fault** flag when the main board stops answering or a reading is more
   than a minute old.
 
@@ -106,8 +157,9 @@ sensor:
 
 | Flag | Default | |
 | --- | --- | --- |
-| `HTRAM_CO2_ALERT_PPM` | 1000 | "CO2 detected" threshold |
+| `HTRAM_CO2_ALERT_PPM` | 0 | fixed "CO2 detected" level; 0 = follow the device's yellow threshold |
 | `HTRAM_OTA_PASS` | `htram-ota` | OTA password — **change it** |
+| `HTRAM_RAW_API` | 1 | `/api/raw` protocol access; set 0 to disable |
 | `HTRAM_HOMESPAN_LOG` | 0 | HomeSpan log level on UART0 (1–2 to debug HomeKit) |
 | `HTRAM_RTS_PIN` | -1 | enable RTS flow control on the AT link if a board needs it |
 
@@ -115,13 +167,18 @@ sensor:
 
 ```
 src/                    firmware (PlatformIO, Arduino-ESP32 2.0, HomeSpan 1.9)
+  gd32_link.*           ESP-AT stand-in on the serial link to the main board
+  device.*              settings, clock, history over the Honeywell protocol
+  homekit.*             Apple Home accessory
+  main.cpp              Wi-Fi setup, web API and pages
 tools/c3-uart-bridge/   ESP32-C3 USB-serial bridge, IO0 control, AT sniffer, BLE client
-tools/*.py              frame builder, flash dumpers, boot-mode control, mDNS test
+tools/*.py              frame builder, flash dumpers, boot-mode control, mDNS and history probes
 docs/                   hardware, protocol, flashing, networking notes
 ```
 
-The firmware uses 95% of the default 1.3 MB app partition. A larger partition
-table is on the to-do list.
+The firmware builds for the `min_spiffs` partition table (two 1.875 MB app
+slots). Units first flashed with the default table need that changed once over
+UART — see [FLASHING.md](docs/FLASHING.md#partition-table).
 
 ## Disclaimer
 

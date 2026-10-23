@@ -3,6 +3,7 @@
 #include <HomeSpan.h>
 #include <Preferences.h>
 
+#include "device.h"
 #include "gd32_link.h"
 
 static const char *HOSTNAME = "htram";
@@ -14,12 +15,18 @@ static const char *HOSTNAME = "htram";
 static const char *OTA_PASS = HTRAM_OTA_PASS;
 static const uint16_t HAP_PORT = 1201;  // port 80 stays with the JSON API
 
-// "CO2 detected" turns on at this level and off again 100 ppm below it, so a
-// reading hovering at the threshold does not flap. 1000 ppm is where the
-// device's own display turns yellow.
+// "CO2 detected" turns on where the device's own display turns yellow (the
+// threshold of its activity level) and off again 100 ppm below, so a reading
+// hovering at the threshold does not flap. HTRAM_CO2_ALERT_PPM overrides it
+// and is the fallback until the thresholds have been read.
 #ifndef HTRAM_CO2_ALERT_PPM
-#define HTRAM_CO2_ALERT_PPM 1000
+#define HTRAM_CO2_ALERT_PPM 0
 #endif
+static int alert_ppm() {
+  if (HTRAM_CO2_ALERT_PPM) return HTRAM_CO2_ALERT_PPM;
+  device::Settings s = device::settings();
+  return s.valid && s.yellow_ppm ? s.yellow_ppm : 1000;
+}
 static const int CO2_ALERT_HYSTERESIS = 100;
 
 // A reading older than this marks the sensors as faulty in the Home app.
@@ -107,9 +114,35 @@ struct Co2Sensor : Service::CarbonDioxideSensor {
       set_if_changed<float>(peak, (float)peak_ppm);
     }
     uint8_t alert = detected->getVal<uint8_t>();
-    if (!alert && r.co2 >= HTRAM_CO2_ALERT_PPM) alert = 1;
-    else if (alert && r.co2 < HTRAM_CO2_ALERT_PPM - CO2_ALERT_HYSTERESIS) alert = 0;
+    int threshold = alert_ppm();
+    if (!alert && r.co2 >= threshold) alert = 1;
+    else if (alert && r.co2 < threshold - CO2_ALERT_HYSTERESIS) alert = 0;
     set_if_changed<uint8_t>(detected, alert);
+  }
+};
+
+// A switch mirroring one of the device's own settings. Changes from the Home
+// app are written to the device; changes made elsewhere (web page, API) flow
+// back within a few seconds.
+struct SettingSwitch : Service::Switch {
+  SpanCharacteristic *on;
+  bool (*get)(const device::Settings &);
+  bool (*set)(bool);
+  uint32_t last_sync = 0;
+
+  SettingSwitch(const char *name, bool (*g)(const device::Settings &), bool (*s)(bool))
+      : Service::Switch(), get(g), set(s) {
+    on = new Characteristic::On(0);
+    new Characteristic::Name(name);
+  }
+
+  boolean update() override { return set(on->getNewVal<bool>()); }
+
+  void loop() override {
+    if (millis() - last_sync < 3000) return;
+    last_sync = millis();
+    device::Settings s = device::settings();
+    if (s.valid) set_if_changed<bool>(on, get(s));
   }
 };
 
@@ -224,6 +257,12 @@ void begin(const String &ssid, const String &pass, const String &serial) {
   new TemperatureSensor();
   new HumiditySensor();
   new Battery();
+  new SettingSwitch(
+      "Alarm Sound", [](const device::Settings &s) { return s.alarm_sound; },
+      [](bool on) { return device::set_alarm_sound(on); });
+  new SettingSwitch(
+      "Display Auto-Off", [](const device::Settings &s) { return s.screen_off_s > 0; },
+      [](bool on) { return device::set_screen_off(on ? 120 : 0); });
 
   homeSpan.autoPoll();
 }

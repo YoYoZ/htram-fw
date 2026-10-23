@@ -1,0 +1,11 @@
+# Build output
+.pio/
+tools/c3-uart-bridge/.pio/
+__pycache__/
+
+# Never commit flash dumps or captures from your own unit: a backup contains the
+# stock Espressif ESP-AT image plus device keys, and logs contain your network.
+*.bin
+*.bin.part
+*.log
+*.rsc

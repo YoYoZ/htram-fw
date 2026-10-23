@@ -142,6 +142,32 @@ static bool find_newest(uint32_t *newest, uint32_t *oldest) {
   return true;
 }
 
+// After a power loss the device stamps records from 2021-01-01 until its clock
+// is set. The moment of the sync shows in the log as an untrusted record
+// followed, one interval later, by a trusted one - which gives the offset for
+// the whole session before it. Walk each such run back to where its clock
+// started (a backwards jump or a big gap marks an earlier power loss) and
+// shift it. Accurate to within one logging interval.
+static const uint32_t LOG_INTERVAL_S = 60;
+
+static void repair_times(std::vector<device::Record> &recs) {
+  for (size_t i = 0; i + 1 < recs.size(); i++) {
+    if (recs[i].time_trusted() || !recs[i + 1].time_trusted() || recs[i + 1].estimated) continue;
+    int64_t offset = (int64_t)recs[i + 1].time - LOG_INTERVAL_S - recs[i].time;
+    if (offset <= 0) continue;
+    size_t j = i;
+    for (;;) {
+      recs[j].time += (uint32_t)offset;
+      recs[j].estimated = true;
+      if (j == 0) break;
+      const device::Record &prev = recs[j - 1];
+      uint32_t here = recs[j].time - (uint32_t)offset;  // device time, before the shift
+      if (prev.time_trusted() || prev.time > here || here - prev.time > 3 * LOG_INTERVAL_S) break;
+      j--;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Background task
 // ---------------------------------------------------------------------------
@@ -314,6 +340,7 @@ std::vector<Record> history(uint32_t minutes, size_t max_records) {
   out.reserve(total);
   for (auto it = packets.rbegin(); it != packets.rend(); ++it) out.insert(out.end(), it->begin(), it->end());
   if (out.size() > want) out.erase(out.begin(), out.end() - want);
+  repair_times(out);
   return out;
 }
 

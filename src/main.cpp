@@ -34,6 +34,7 @@
 #include "device.h"
 #include "gd32_link.h"
 #include "homekit.h"
+#include "version.h"
 
 static const char *SETUP_SSID = "HTRAM-Setup";
 static const char *SETUP_PASS = "htram-setup";
@@ -83,6 +84,38 @@ static String escape(const String &in) {
 static String code_box();
 
 // ---------------------------------------------------------------------------
+// Access control
+//
+// Optional. With no admin password set everything is open, as on any plain
+// LAN gadget. With one set (on /setup), every request that changes something
+// needs it (HTTP basic auth, user "admin"), it becomes the OTA password, and
+// it replaces the public password of the HTRAM-Setup access point - so the
+// fallback portal is only usable by someone who knows it. Reading stays open.
+// ---------------------------------------------------------------------------
+static String admin_pass;
+
+static bool authorized() {
+  if (!admin_pass.length() || server.authenticate("admin", admin_pass.c_str())) return true;
+  server.requestAuthentication(BASIC_AUTH, "HTRAM", "Admin password required");
+  return false;
+}
+
+// Over-the-air update password: a build-time override, else the admin
+// password, else one unique to this chip, shown on the setup page.
+#ifndef HTRAM_OTA_PASS
+#define HTRAM_OTA_PASS ""
+#endif
+static String ota_password() {
+  if (strlen(HTRAM_OTA_PASS)) return HTRAM_OTA_PASS;
+  if (admin_pass.length()) return admin_pass;
+  uint64_t h = ESP.getEfuseMac() * 0x9E3779B97F4A7C15ULL;
+  h ^= h >> 29;
+  char b[20];
+  snprintf(b, sizeof(b), "htram-%08lx", (unsigned long)(h & 0xffffffffULL));
+  return b;
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 static void handle_data() {
@@ -111,6 +144,7 @@ static void handle_data() {
     j += ",\"yellow_ppm\":" + String(s.yellow_ppm) + ",\"red_ppm\":" + String(s.red_ppm);
   }
   j += ",\"uptime_seconds\":" + String(millis() / 1000);
+  j += ",\"firmware_version\":\"" HTRAM_FW_VERSION "\"";
   j += "}";
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", j);
@@ -167,6 +201,7 @@ static String apply_settings() {
 
 static void handle_api_settings() {
   if (server.method() == HTTP_POST) {
+    if (!authorized()) return;
     String err = apply_settings();
     if (err.length()) {
       server.send(400, "application/json", "{\"error\":\"" + err + "\"}");
@@ -188,13 +223,15 @@ static void handle_history() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, csv ? "text/csv" : "application/json", "");
-  server.sendContent(csv ? "time,co2,temperature,humidity,time_trusted\n"
+  // time_trusted: the timestamp is real time. time_estimated: it was shifted
+  // from the device's unsynced clock (accurate to about a minute).
+  server.sendContent(csv ? "time,co2,temperature,humidity,time_trusted,time_estimated\n"
                          : "{\"interval_seconds\":60,\"fields\":[\"time\",\"co2\",\"temperature\","
-                           "\"humidity\",\"time_trusted\"],\"records\":[");
+                           "\"humidity\",\"time_trusted\",\"time_estimated\"],\"records\":[");
   String chunk;
   for (size_t i = 0; i < recs.size(); i++) {
     const device::Record &r = recs[i];
-    String t = r.time_trusted() ? "true" : "false";
+    String t = String(r.time_trusted() ? "true" : "false") + "," + (r.estimated ? "true" : "false");
     if (csv)
       chunk += String(r.time) + "," + r.co2 + "," + r.temperature + "," + r.humidity + "," + t + "\n";
     else
@@ -211,6 +248,7 @@ static void handle_history() {
 
 static void handle_settings_page() {
   if (server.method() == HTTP_POST) {
+    if (!authorized()) return;
     String err = apply_settings();
     server.sendHeader("Location", err.length() ? "/settings?error=" + err : String("/settings?saved=1"));
     server.send(303);
@@ -264,8 +302,10 @@ static void handle_settings_page() {
 // Developer access to the device protocol: sends one frame to the main board
 // and returns its reply. Either a whole frame,  /api/raw?frame=7b4100062021...
 // or a command and payload, with the CRC added: /api/raw?cmd=2021&payload=01
+// Off in normal builds: it can send the main board anything, including
+// switching it to Wi-Fi mode. Build with -DHTRAM_RAW_API=1 to explore.
 #ifndef HTRAM_RAW_API
-#define HTRAM_RAW_API 1
+#define HTRAM_RAW_API 0
 #endif
 #if HTRAM_RAW_API
 static String to_hex(const uint8_t *b, size_t n) {
@@ -287,6 +327,7 @@ static size_t from_hex(String hex, uint8_t *out, size_t cap) {
 }
 
 static void handle_raw() {
+  if (!authorized()) return;
   uint8_t req[128], rep[256];
   size_t n = from_hex(server.arg("frame"), req, sizeof(req));
   if (!n && server.hasArg("cmd")) {
@@ -330,7 +371,63 @@ static void handle_metrics() {
   m += "htram_link_replies_total " + String(s.replies) + "\n";
   m += "# TYPE htram_link_bad_frames_total counter\n";
   m += "htram_link_bad_frames_total " + String(s.bad_frames) + "\n";
+
+  device::Settings ds = device::settings();
+  if (ds.valid) {
+    m += "# HELP htram_risk_level The device's traffic light: 0 green, 1 yellow, 2 red\n";
+    m += "# TYPE htram_risk_level gauge\n";
+    const char *level = (r.valid && !r.warming_up) ? device::risk_level(r.co2) : "";
+    if (*level) m += "htram_risk_level " + String(!strcmp(level, "red") ? 2 : !strcmp(level, "yellow") ? 1 : 0) + "\n";
+    m += "# TYPE htram_threshold_ppm gauge\n";
+    m += "htram_threshold_ppm{level=\"yellow\"} " + String(ds.yellow_ppm) + "\n";
+    m += "htram_threshold_ppm{level=\"red\"} " + String(ds.red_ppm) + "\n";
+    m += "# TYPE htram_activity_info gauge\n";
+    m += "htram_activity_info{activity=\"" + String(device::activity_name(ds.activity)) + "\"} 1\n";
+  }
+  m += "# TYPE htram_uptime_seconds counter\n";
+  m += "htram_uptime_seconds " + String(millis() / 1000) + "\n";
+  m += "# TYPE htram_build_info gauge\n";
+  m += "htram_build_info{version=\"" HTRAM_FW_VERSION "\"} 1\n";
   server.send(200, "text/plain; version=0.0.4", m);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+static const char *reset_reason() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_SW: return "software restart";
+    case ESP_RST_PANIC: return "crash (panic)";
+    case ESP_RST_INT_WDT: return "interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    case ESP_RST_EXT: return "external reset";
+    default: return "unknown";
+  }
+}
+
+static void handle_diag() {
+  const LinkStats &s = gd32::stats();
+  device::Settings ds = device::settings();
+  String j = "{\"firmware_version\":\"" HTRAM_FW_VERSION "\"";
+  j += ",\"uptime_seconds\":" + String(millis() / 1000);
+  j += ",\"reset_reason\":\"" + String(reset_reason()) + "\"";
+  j += ",\"free_heap\":" + String(ESP.getFreeHeap()) + ",\"min_free_heap\":" + String(ESP.getMinFreeHeap());
+  j += ",\"wifi\":{\"mode\":\"" + String(portal_mode ? "setup portal" : "station") + "\"";
+  if (!portal_mode) j += ",\"ssid\":\"" + WiFi.SSID() + "\",\"rssi\":" + String(WiFi.RSSI()) +
+                         ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
+  j += "},\"homekit_paired\":" + String(homekit::paired() ? "true" : "false");
+  j += ",\"link\":{\"online\":" + String(gd32::online() ? "true" : "false");
+  j += ",\"requests\":" + String(s.requests) + ",\"replies\":" + String(s.replies);
+  j += ",\"bad_frames\":" + String(s.bad_frames) + ",\"at_commands\":" + String(s.at_commands) + "}";
+  j += ",\"clock_synced\":" + String(ds.clock_synced_at ? "true" : "false");
+  if (ds.clock_synced_at) j += ",\"clock_synced_seconds_ago\":" + String((millis() - ds.clock_synced_at) / 1000);
+  j += ",\"main_board_firmware\":\"" + ds.firmware + "\"}";
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", j);
 }
 
 static void handle_root() {
@@ -361,18 +458,20 @@ static void handle_root() {
     h += "<tr><td>Reading age</td><td>" + String((millis() - r.millis_at) / 1000) +
          " s</td></tr>";
   }
-  h += "</table><p class=m>" + String(s.replies) + " of " + String(s.requests) +
-       " requests answered";
+  h += "</table><p class=m>htram-fw " HTRAM_FW_VERSION " &middot; up " + String(millis() / 1000) +
+       " s since " + reset_reason() + " &middot; " + String(s.replies) + " of " + String(s.requests) +
+       " readings answered";
   if (s.bad_frames) h += ", " + String(s.bad_frames) + " bad frames";
-  h += ".<br>Uptime " + String(millis() / 1000) + " s. IP " +
-       (portal_mode ? WiFi.softAPIP().toString() : WiFi.localIP().toString()) + ".";
+  h += " &middot; clock " + String(device::settings().clock_synced_at ? "synced" : "not synced");
+  h += "<br>IP " + (portal_mode ? WiFi.softAPIP().toString() : WiFi.localIP().toString());
+  if (!portal_mode) h += ", Wi-Fi " + String(WiFi.RSSI()) + " dBm";
   if (!portal_mode && homekit::paired()) h += "<br>Paired with Apple Home.";
   h += "</p>";
   if (!portal_mode && !homekit::paired()) h += code_box();
   h += "<p class=m>";
   h += "<br><a href=/settings>Device settings</a> &middot; <a href=/api/data>/api/data</a>"
        " &middot; <a href=/api/history>/api/history</a> &middot; <a href=/metrics>/metrics</a>"
-       " &middot; <a href=/setup>Wi-Fi setup</a></p>";
+       " &middot; <a href=/api/diag>/api/diag</a> &middot; <a href=/setup>Wi-Fi setup</a></p>";
   // Last 24 hours from the device's own log, drawn client-side.
   h += "<svg id=c viewBox='0 0 600 120' style='width:100%;height:120px'></svg>"
        "<p class=m id=cl>Loading the last 24 h from the device&hellip;</p><script>"
@@ -406,12 +505,16 @@ static String code_box() {
 // Puts the 6-digit PIN on the device's screen for a minute. Readings pause
 // for that minute, so it only happens on request and once after boot.
 static void handle_show_code() {
+  if (!portal_mode && !authorized()) return;
   gd32::show_pin(homekit::setup_pin(), 60000);
   server.sendHeader("Location", portal_mode ? String("/setup") : String("/"));
   server.send(303);
 }
 
+// In the setup portal the access point itself is the protection (its password
+// is the admin password once one is set); on the home network the page asks.
 static void handle_setup_page() {
+  if (!portal_mode && !authorized()) return;
   String h = PAGE_HEAD;
   h += "<title>HTRAM Wi-Fi</title><h1>Transmission Risk Air Monitor</h1>";
   h += code_box();
@@ -422,21 +525,37 @@ static void handle_setup_page() {
   for (int i = 0; i < n && i < 20; i++) h += "<option value=\"" + escape(WiFi.SSID(i)) + "\">";
   WiFi.scanDelete();
   h += "</datalist><label>Password</label><input name=pass type=password>";
+  h += "<label>Admin password <span class=m>(optional, 8+ characters)</span></label>"
+       "<input name=admin type=password autocomplete=new-password>";
+  if (admin_pass.length())
+    h += "<label class=m><input type=checkbox name=clear_admin style='width:auto'> remove the admin password</label>";
   h += "<button>Save and restart</button></form>";
-  h += "<p class=m>The password is stored on the device only.</p>";
+  h += "<p class=m>Passwords are stored on the device only. The admin password protects every change "
+       "(user <b>admin</b>), becomes the password of the HTRAM-Setup network, and is the OTA password.";
+  if (!admin_pass.length() && !strlen(HTRAM_OTA_PASS))
+    h += " Without one, this device's OTA password is <b>" + ota_password() + "</b>.";
+  h += "</p>";
   server.send(200, "text/html", h);
 }
 
 static void handle_setup_save() {
+  if (!portal_mode && !authorized()) return;
   String ssid = server.arg("ssid");
   String pass = server.arg("pass");
+  String admin = server.arg("admin");
   if (!ssid.length()) {
     server.send(400, "text/plain", "network name required");
+    return;
+  }
+  if (admin.length() && admin.length() < 8) {  // also the WPA2 password of the setup network
+    server.send(400, "text/plain", "admin password must be at least 8 characters");
     return;
   }
   prefs.begin("htram", false);
   prefs.putString("ssid", ssid);
   if (pass.length()) prefs.putString("pass", pass);
+  if (admin.length()) prefs.putString("admin", admin);
+  else if (server.hasArg("clear_admin")) prefs.remove("admin");
   prefs.end();
 
   String h = PAGE_HEAD;
@@ -459,7 +578,7 @@ static void handle_setup_save() {
 static void start_portal() {
   portal_mode = true;
   WiFi.mode(WIFI_AP_STA);  // STA side only for scanning nearby networks
-  WiFi.softAP(SETUP_SSID, SETUP_PASS);
+  WiFi.softAP(SETUP_SSID, admin_pass.length() >= 8 ? admin_pass.c_str() : SETUP_PASS);
   dns.setErrorReplyCode(DNSReplyCode::NoError);
   dns.start(53, "*", WiFi.softAPIP());
 }
@@ -473,6 +592,7 @@ static void start_web() {
   server.on("/", handle_root);
   server.on("/api/data", handle_data);
   server.on("/metrics", handle_metrics);
+  server.on("/api/diag", handle_diag);
 #if HTRAM_RAW_API
   server.on("/api/raw", handle_raw);
 #endif
@@ -502,6 +622,7 @@ void setup() {
   wifi_pass = prefs.getString("pass", "");
   String serial = prefs.getString("serial", "HTRAM");
   bool fallback = prefs.getBool("portal_once", false);
+  admin_pass = prefs.getString("admin", "");
   prefs.end();
 
   if (!wifi_ssid.length() || fallback) {
@@ -521,7 +642,7 @@ void setup() {
 
   // From here HomeSpan runs Wi-Fi, mDNS (htram.local) and OTA updates in its
   // own task, reconnecting by itself if the network drops.
-  homekit::begin(wifi_ssid, wifi_pass, serial);
+  homekit::begin(wifi_ssid, wifi_pass, serial, ota_password());
 }
 
 void loop() {

@@ -61,11 +61,16 @@ table keeps working and keeps accepting OTA updates while the image fits its
 ## Later: over Wi-Fi
 
 ```bash
-pio run -e htram_ota -t upload
+HTRAM_OTA_PASS=<password> pio run -e htram_ota -t upload
 ```
 
-Change the OTA password before you rely on it: build with
-`-DHTRAM_OTA_PASS='"..."'` and set the same value in `upload_flags`.
+The password is the admin password if you set one, otherwise the device's own,
+shown on its `/setup` page.
+
+**There is no automatic rollback.** The Arduino bootloader boots whatever was
+written last, so an update that crashes at startup needs the UART wires to
+recover. Test risky changes on the bench, or keep the wires on until you trust
+a build.
 
 ## The ESP32-C3 SuperMini bridge
 

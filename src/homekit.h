@@ -10,8 +10,9 @@
 namespace homekit {
 
 // Starts HomeSpan on the given network. `serial` goes into the accessory's
-// information record. Returns once HomeSpan's task is running.
-void begin(const String &ssid, const String &pass, const String &serial);
+// information record; `ota_pass` protects over-the-air updates. Returns once
+// HomeSpan's task is running.
+void begin(const String &ssid, const String &pass, const String &serial, const String &ota_pass);
 
 // True once HomeSpan has brought Wi-Fi up for the first time.
 bool network_ready();

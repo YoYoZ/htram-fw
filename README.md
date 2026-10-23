@@ -32,6 +32,15 @@ $ curl http://htram.local/api/data
 The display, alarm, LEDs and buttons keep working exactly as before: they run
 on the device's main controller, which is not touched.
 
+### Why bother
+
+These monitors are largely forgotten and sell second-hand for very little —
+often less than the NDIR CO2 sensor inside them would cost on its own. On top
+of that you get a colour display, traffic-light LEDs, a buzzer, an ESP32 with
+Bluetooth and Wi-Fi, an aluminium case and an 18650-class Li-ion battery
+(2600 mAh, about 10 hours). With working firmware, that is a very good CO2
+monitor for the price of a sensor.
+
 ## How it works
 
 The monitor's brain is a GD32F150 microcontroller. It drives the ESP32 as a
@@ -76,11 +85,26 @@ backup restores the original firmware at any time.
 | `GET /api/data` | current reading and risk level, CORS-enabled |
 | `GET /api/settings` | the device's settings; `POST` to change them |
 | `GET /api/history?minutes=1440` | the device's own log, JSON; add `&format=csv` |
-| `GET /metrics` | Prometheus text format |
+| `GET /metrics` | Prometheus text format, including risk level and thresholds |
+| `GET /api/diag` | firmware version, uptime, reset reason, Wi-Fi, link counters, clock sync |
 | `/` | status page with a 24 h chart and the Apple Home setup code |
 | `/settings` | device settings form |
 | `/setup` | change Wi-Fi credentials |
-| `GET /api/raw?cmd=2021&payload=01` | send any protocol frame (developer aid) |
+| `GET /api/raw?cmd=2021&payload=01` | send any protocol frame — only in builds with `HTRAM_RAW_API=1` |
+
+### Admin password
+
+Optional, set on the setup page. Without one everything is open, like most
+LAN gadgets. With one (8+ characters):
+
+- every request that **changes** something needs it — HTTP basic auth, user
+  `admin` (`curl -u admin:… -X POST …`); reading stays open;
+- it becomes the password of the **HTRAM-Setup** network, so the fallback
+  portal is only usable by someone who knows it;
+- it is the **OTA password**.
+
+Without an admin password the OTA password is unique to each device and shown
+on its setup page.
 
 `co2` is `null` while the sensor warms up after power-on. `battery` is 0–4
 bars, as on the device. `level` is the device's own traffic light: `green`,
@@ -168,8 +192,8 @@ sensor:
 | Flag | Default | |
 | --- | --- | --- |
 | `HTRAM_CO2_ALERT_PPM` | 0 | fixed "CO2 detected" level; 0 = follow the device's yellow threshold |
-| `HTRAM_OTA_PASS` | `htram-ota` | OTA password — **change it** |
-| `HTRAM_RAW_API` | 1 | `/api/raw` protocol access; set 0 to disable |
+| `HTRAM_OTA_PASS` | — | fixed OTA password, overriding the admin/per-device one |
+| `HTRAM_RAW_API` | 0 | `/api/raw` protocol access (developer builds) |
 | `HTRAM_HOMESPAN_LOG` | 0 | HomeSpan log level on UART0 (1–2 to debug HomeKit) |
 | `HTRAM_RTS_PIN` | -1 | enable RTS flow control on the AT link if a board needs it |
 
@@ -189,6 +213,12 @@ docs/                   hardware, protocol, flashing, networking notes
 The firmware builds for the `min_spiffs` partition table (two 1.875 MB app
 slots). Units first flashed with the default table need that changed once over
 UART — see [FLASHING.md](docs/FLASHING.md#partition-table).
+
+## Credits
+
+[HomeSpan](https://github.com/HomeSpan/HomeSpan) for HomeKit,
+[Espressif](https://github.com/espressif/esp-at) for the ESP-AT protocol this
+firmware stands in for, and [PlatformIO](https://platformio.org/) for the build.
 
 ## Disclaimer
 

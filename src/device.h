@@ -34,7 +34,10 @@ struct Record {
   int8_t temperature;
   uint8_t humidity;
   // The device's clock restarts at 2021-01-01 whenever it loses power and is
-  // only correct after a sync, so older timestamps may be meaningless.
+  // only correct after a sync. Records from before a sync are shifted to real
+  // time when the sync is visible in the log (see history()); those carry
+  // `estimated`. Anything still before 2024 is from an unsynced session.
+  bool estimated = false;
   bool time_trusted() const { return time >= 1704067200; }  // 2024-01-01
 };
 

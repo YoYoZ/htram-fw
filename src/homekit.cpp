@@ -5,14 +5,9 @@
 
 #include "device.h"
 #include "gd32_link.h"
+#include "version.h"
 
 static const char *HOSTNAME = "htram";
-// Change it for your build: -DHTRAM_OTA_PASS='"something-long"' in platformio.ini,
-// and the same value in upload_flags for env:htram_ota.
-#ifndef HTRAM_OTA_PASS
-#define HTRAM_OTA_PASS "htram-ota"
-#endif
-static const char *OTA_PASS = HTRAM_OTA_PASS;
 static const uint16_t HAP_PORT = 1201;  // port 80 stays with the JSON API
 
 // "CO2 detected" turns on where the device's own display turns yellow (the
@@ -225,7 +220,7 @@ static bool started = false;
 
 bool paired() { return started && homeSpan.controllerListBegin() != homeSpan.controllerListEnd(); }
 
-void begin(const String &ssid, const String &pass, const String &serial) {
+void begin(const String &ssid, const String &pass, const String &serial, const String &ota_pass) {
 #ifndef HTRAM_HOMESPAN_LOG
 #define HTRAM_HOMESPAN_LOG 0
 #endif
@@ -235,10 +230,12 @@ void begin(const String &ssid, const String &pass, const String &serial) {
   homeSpan.setSerialInputDisable(true);
   homeSpan.setHostNameSuffix("");
   homeSpan.setPortNum(HAP_PORT);
-  homeSpan.setSketchVersion("htram-fw 1.1");
+  homeSpan.setSketchVersion("htram-fw " HTRAM_FW_VERSION);
   homeSpan.setWifiCredentials(ssid.c_str(), pass.c_str());
   homeSpan.setWifiCallback([]() { wifi_up = true; });
-  homeSpan.enableOTA(OTA_PASS);
+  static String ota;  // HomeSpan keeps the pointer
+  ota = ota_pass;
+  homeSpan.enableOTA(ota.c_str());
 
   homeSpan.begin(Category::Sensors, "HTRAM CO2 Monitor", HOSTNAME, "HTRAM-V1-W");
   started = true;
@@ -260,7 +257,7 @@ void begin(const String &ssid, const String &pass, const String &serial) {
   new Characteristic::Manufacturer("Honeywell");
   new Characteristic::Model("HTRAM-V1-W");
   new Characteristic::SerialNumber(serial.c_str());
-  new Characteristic::FirmwareRevision("1.1");
+  new Characteristic::FirmwareRevision(HTRAM_FW_VERSION);
 
   new Co2Sensor();
   new TemperatureSensor();

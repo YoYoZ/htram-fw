@@ -142,9 +142,10 @@ curl "http://htram.local/api/history?minutes=1440&format=csv" > today.csv
 One record per minute, read straight from the device's flash (about 5 s per
 day, up to 7 days per request). The device writes records in batches of 16, so
 the newest can be up to 16 minutes old — `/api/data` has the live value. Each
-record has a `time_trusted` flag: timestamps from before the clock was synced
-after a power loss start at 2021-01-01 and are only right relative to each
-other.
+record has a `time_trusted` flag. After a power loss the device's clock starts
+again at 2021-01-01; once it has been synced, the records of that session are
+shifted to real time (accurate to about a minute) and marked `time_estimated`.
+Only sessions that never saw a sync keep untrusted timestamps.
 
 ## Apple Home
 

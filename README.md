@@ -57,10 +57,14 @@ iron, and [PlatformIO](https://platformio.org/).
 2. **Back up** the stock firmware — [FLASHING.md](docs/FLASHING.md#back-up-first).
 3. **Flash**: `pio run -e htram`, then [flash it](docs/FLASHING.md#first-flash).
 4. **Power on** the monitor (hold its button two seconds). It opens a Wi-Fi
-   network **HTRAM-Setup** (password `htram-setup`); join it, open
-   <http://192.168.4.1/setup> and enter your network.
-5. Open <http://htram.local>. The status page shows the readings and the Apple
-   Home setup code.
+   network **HTRAM-Setup** (password `htram-setup`). Join it and the setup page
+   opens by itself (or go to <http://192.168.4.1>). It shows your **Apple Home
+   setup code** — note it — and lets you pick your network.
+5. Open <http://htram.local> for the readings.
+
+If the monitor cannot join the network (wrong password, router gone), it
+reopens **HTRAM-Setup** after three minutes and tries the saved network again
+ten minutes later, so you never need the serial cable to fix Wi-Fi.
 
 The ESP32 on these units has no flash encryption or secure boot, and your
 backup restores the original firmware at any time.
@@ -132,8 +136,14 @@ enter the setup code from the status page.
 - A **fault** flag when the main board stops answering or a reading is more
   than a minute old.
 
-Each unit gets its own setup code, derived from its MAC address. HomeKit runs
-on TCP 1201; port 80 stays with the JSON API.
+Each unit gets its own setup code, derived from its MAC address: six digits
+followed by `00` (for example `123-45-600`). The setup page, the "saved" page
+and — until the accessory is paired — the status page all show it. The
+firmware also asks the monitor to show the six digits on its own screen as a
+Bluetooth pairing PIN, once after boot while unpaired and whenever you press
+*Show it on the monitor's screen* (readings pause for that minute).
+*This on-screen PIN is not yet confirmed on real hardware.* HomeKit runs on
+TCP 1201; port 80 stays with the JSON API.
 
 **"No Response" right after pairing** almost always means your home hub (Apple
 TV, HomePod) is on a different subnet and cannot see the accessory's Bonjour

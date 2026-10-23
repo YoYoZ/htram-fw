@@ -39,26 +39,28 @@ static volatile bool wifi_up = false;
 //
 // HomeSpan ships with one fixed code for every device, which is a poor default
 // for a firmware meant to be flashed onto many units. Derive one from the MAC
-// address instead, skipping the codes HomeKit refuses as too simple.
+// address instead.
+//
+// The device's own screen can show a 6-digit Bluetooth pairing PIN (see
+// gd32::show_pin), so the code is those 6 digits followed by "00": a user reads
+// 123456 off the display and types 123-45-600. With a fixed "00" tail, the only
+// code HomeKit would refuse as too simple is 00000000, which is skipped.
 // ---------------------------------------------------------------------------
-static bool code_allowed(const char *c) {
-  static const char *banned[] = {"00000000", "11111111", "22222222", "33333333",
-                                 "44444444", "55555555", "66666666", "77777777",
-                                 "88888888", "99999999", "12345678", "87654321"};
-  for (const char *b : banned)
-    if (!strcmp(c, b)) return false;
-  return true;
-}
-
-static String raw_code() {
+static uint32_t pin6() {
   uint64_t h = ESP.getEfuseMac() ^ 0x9E3779B97F4A7C15ULL;
-  char c[9];
+  uint32_t p;
   do {
     h ^= h >> 33;
     h *= 0xFF51AFD7ED558CCDULL;
     h ^= h >> 33;
-    snprintf(c, sizeof(c), "%08lu", (unsigned long)(h % 100000000ULL));
-  } while (!code_allowed(c));
+    p = (uint32_t)(h % 1000000ULL);
+  } while (p == 0);
+  return p;
+}
+
+static String raw_code() {
+  char c[9];
+  snprintf(c, sizeof(c), "%06lu00", (unsigned long)pin6());
   return String(c);
 }
 
@@ -217,6 +219,12 @@ String setup_code() {
 
 bool network_ready() { return wifi_up; }
 
+uint32_t setup_pin() { return pin6(); }
+
+static bool started = false;
+
+bool paired() { return started && homeSpan.controllerListBegin() != homeSpan.controllerListEnd(); }
+
 void begin(const String &ssid, const String &pass, const String &serial) {
 #ifndef HTRAM_HOMESPAN_LOG
 #define HTRAM_HOMESPAN_LOG 0
@@ -233,6 +241,7 @@ void begin(const String &ssid, const String &pass, const String &serial) {
   homeSpan.enableOTA(OTA_PASS);
 
   homeSpan.begin(Category::Sensors, "HTRAM CO2 Monitor", HOSTNAME, "HTRAM-V1-W");
+  started = true;
 
   // Set the setup code once per device; it takes a few seconds to compute.
   Preferences prefs;

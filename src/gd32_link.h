@@ -52,6 +52,11 @@ String device_name();
 // True once the GD32 has finished its boot sequence and accepted our client.
 bool online();
 
+// Asks the GD32 to show a 6-digit number on its screen, as the Bluetooth
+// pairing passkey, for about `hold_ms`. Readings pause meanwhile. If the link
+// is up it is briefly re-paired to make that happen.
+void show_pin(uint32_t pin, uint32_t hold_ms = 60000);
+
 // Builds a device frame: 7b 41 00 <len> <cmd> <payload> <crc16> 7d. `out` needs
 // room for n + 9 bytes. Returns the frame length.
 size_t build_frame(uint16_t cmd, const uint8_t *payload, size_t n, uint8_t *out);

@@ -86,6 +86,14 @@ static uint32_t last_resubscribe = 0;
 static uint32_t ready_sent_at = 0;
 static uint32_t last_command_at = 0;
 
+// A 6-digit number to put on the device's screen. The GD32 was set up as a
+// display-only pairing peer and shows the passkey ESP-AT reports during
+// pairing (+BLESECNTFYKEY), so the next pairing shows ours, held for a while.
+static volatile uint32_t pin_value = 0;
+static volatile uint32_t pin_hold_ms = 0;
+static volatile bool pin_pending = false;
+static bool pin_shown = false;  // this pairing round already sent it
+
 // Milliseconds since `then`, safe across millis() wrap and against `then`
 // being a moment later than the caller's own idea of "now".
 static int32_t since(uint32_t then) { return (int32_t)(millis() - then); }
@@ -129,8 +137,17 @@ static void announce_ready() {
   last_command_at = 0;
 }
 
+// Reports the passkey if one is waiting, and keeps pairing open while it shows.
+static void maybe_show_pin() {
+  if (!pin_pending || pin_shown) return;
+  pin_shown = true;
+  pin_pending = false;
+  AT.printf("\r\n+BLESECNTFYKEY:0,%06lu\r\n", (unsigned long)pin_value);
+  pair_at = millis() + pin_hold_ms;
+}
+
 // Reports the client dropping off and, a moment later, connecting again.
-// Used to recover a link that has gone quiet.
+// Used to recover a link that has gone quiet, and to rerun pairing.
 static void reconnect_client() {
   AT.printf("\r\n+BLEDISCONN:0,%s\r\n", CLIENT_ADDR);
   phase = PHASE_ADVERTISING;
@@ -243,6 +260,7 @@ static void handle_at(const String &cmd) {
   } else if (starts_with(cmd, "AT+BLEENC")) {
     send_ok();
     pair_at = millis() + 250;
+    maybe_show_pin();  // a real phone's passkey would arrive at this point
   } else if (starts_with(cmd, "AT+BLEGATTSNTFY")) {
     // "AT+BLEGATTSNTFY=<conn>,<srv>,<char>,<len>" then <len> raw bytes.
     int comma = cmd.lastIndexOf(',');
@@ -309,6 +327,14 @@ void begin() {
   delay(100);
   announce_ready();
   xTaskCreatePinnedToCore(link_task, "gd32", 4096, nullptr, 2, nullptr, 1);
+}
+
+void show_pin(uint32_t pin, uint32_t hold_ms) {
+  pin_value = pin % 1000000;
+  pin_hold_ms = hold_ms;
+  pin_pending = true;
+  // Already connected: have the client reconnect, which reruns pairing.
+  if (phase == PHASE_READY) reconnect_client();
 }
 
 size_t build_frame(uint16_t cmd, const uint8_t *payload, size_t n, uint8_t *out) {
@@ -398,14 +424,19 @@ static void service() {
     connect_at = 0;
     AT.printf("\r\n+BLECONN:0,%s\r\n", CLIENT_ADDR);
     phase = PHASE_PAIRING;
+    pin_shown = false;
     // The GD32 normally answers a connection by asking for encryption, which
     // schedules pair_at. Do not wait forever if it does not.
     pair_at = millis() + 3000;
   }
 
   if (phase == PHASE_PAIRING && pair_at && since(pair_at) >= 0) {
-    pair_at = 0;
-    report_client_subscribed();
+    if (pin_pending && !pin_shown) {
+      maybe_show_pin();  // the GD32 never asked for encryption; show it anyway
+    } else {
+      pair_at = 0;
+      report_client_subscribed();
+    }
   }
 
   if (phase == PHASE_READY && tx_pending && !frame_want) {

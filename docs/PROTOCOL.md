@@ -46,6 +46,21 @@ ESP32  +BLECFGMTU:0,247
 ESP32  +WRITE:0,2,1,1,2,<01 00>        client enables notifications on Read-Data
 ```
 
+### Showing a number on the device's screen (unconfirmed)
+
+The GD32 declares itself display-only for Bluetooth pairing (the `0` in
+`AT+BLESECPARAM=1,0,16,3,3`), and the manual has users type "the PIN CODE
+shown on the device's screen". In ESP-AT, a passkey for a display-only peer
+reaches the host as:
+
+```
+ESP32  +BLESECNTFYKEY:0,123456
+```
+
+htram-fw sends that during a (re)pairing, after `AT+BLEENC`, and holds off
+`+BLEAUTHCMPL` for a minute so the number stays up. The re-pairing itself is
+confirmed to work; whether the GD32 draws the number has not been checked yet.
+
 ### A request and its reply
 
 ```

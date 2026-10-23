@@ -25,6 +25,7 @@
 // restored at any time from a backup of the module's flash.
 
 #include <Arduino.h>
+#include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -36,8 +37,14 @@
 
 static const char *SETUP_SSID = "HTRAM-Setup";
 static const char *SETUP_PASS = "htram-setup";
+// No network this long after boot (wrong password, router gone): restart into
+// the setup portal, and leave the portal again after a while to retry Wi-Fi.
+static const uint32_t WIFI_GIVE_UP_MS = 3UL * 60 * 1000;
+static const uint32_t PORTAL_RETRY_MS = 10UL * 60 * 1000;
+static uint32_t portal_until = 0;  // 0 = stay in the portal (no credentials at all)
 
 static WebServer server(80);
+static DNSServer dns;
 static Preferences prefs;
 static bool portal_mode = false;
 static bool web_started = false;
@@ -72,6 +79,8 @@ static String escape(const String &in) {
   }
   return out;
 }
+
+static String code_box();
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -357,9 +366,10 @@ static void handle_root() {
   if (s.bad_frames) h += ", " + String(s.bad_frames) + " bad frames";
   h += ".<br>Uptime " + String(millis() / 1000) + " s. IP " +
        (portal_mode ? WiFi.softAPIP().toString() : WiFi.localIP().toString()) + ".";
-  if (!portal_mode)
-    h += "<br>Apple Home: Add Accessory &rarr; More options, setup code <b>" +
-         homekit::setup_code() + "</b>";
+  if (!portal_mode && homekit::paired()) h += "<br>Paired with Apple Home.";
+  h += "</p>";
+  if (!portal_mode && !homekit::paired()) h += code_box();
+  h += "<p class=m>";
   h += "<br><a href=/settings>Device settings</a> &middot; <a href=/api/data>/api/data</a>"
        " &middot; <a href=/api/history>/api/history</a> &middot; <a href=/metrics>/metrics</a>"
        " &middot; <a href=/setup>Wi-Fi setup</a></p>";
@@ -376,11 +386,42 @@ static void handle_root() {
   server.send(200, "text/html", h);
 }
 
+// The Apple Home setup code, big enough to read off a phone. It comes from the
+// chip's MAC address, so it is known before the device ever joins a network -
+// which is the point: this is the only place a user without a serial cable
+// can see it before pairing.
+static String code_box() {
+  return "<div style='border:2px solid currentColor;border-radius:8px;padding:.8rem;margin:1rem 0;"
+         "text-align:center'><div class=m>Apple Home setup code &mdash; note it down</div>"
+         "<div style='font-size:2rem;font-weight:600;letter-spacing:.08em;"
+         "font-variant-numeric:tabular-nums'>" +
+         homekit::setup_code() +
+         "</div><div class=m>Home app &rarr; Add Accessory &rarr; More options &rarr; "
+         "HTRAM CO2 Monitor. The monitor's screen shows the first six digits as its "
+         "pairing PIN; add <b>00</b>.</div>"
+         "<form method=POST action=/show-code style='margin:.6rem 0 0'>"
+         "<button>Show it on the monitor's screen</button></form></div>";
+}
+
+// Puts the 6-digit PIN on the device's screen for a minute. Readings pause
+// for that minute, so it only happens on request and once after boot.
+static void handle_show_code() {
+  gd32::show_pin(homekit::setup_pin(), 60000);
+  server.sendHeader("Location", portal_mode ? String("/setup") : String("/"));
+  server.send(303);
+}
+
 static void handle_setup_page() {
   String h = PAGE_HEAD;
-  h += "<title>HTRAM Wi-Fi</title><h1>Wi-Fi</h1><form method=POST action=/setup>";
-  h += "<label>Network</label><input name=ssid value=\"" + escape(wifi_ssid) + "\">";
-  h += "<label>Password</label><input name=pass type=password>";
+  h += "<title>HTRAM Wi-Fi</title><h1>Transmission Risk Air Monitor</h1>";
+  h += code_box();
+  h += "<form method=POST action=/setup><label>Wi-Fi network</label>"
+       "<input name=ssid list=nets autocomplete=off value=\"" + escape(wifi_ssid) + "\"><datalist id=nets>";
+  // Offer what is in range. Takes a couple of seconds; fine for a setup page.
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n && i < 20; i++) h += "<option value=\"" + escape(WiFi.SSID(i)) + "\">";
+  WiFi.scanDelete();
+  h += "</datalist><label>Password</label><input name=pass type=password>";
   h += "<button>Save and restart</button></form>";
   h += "<p class=m>The password is stored on the device only.</p>";
   server.send(200, "text/html", h);
@@ -399,19 +440,33 @@ static void handle_setup_save() {
   prefs.end();
 
   String h = PAGE_HEAD;
-  h += "<title>HTRAM</title><p>Saved. Restarting&hellip;</p>";
+  h += "<title>HTRAM</title><h1>Saved</h1><p>The monitor restarts and joins <b>" + escape(ssid) +
+       "</b>. Put your phone back on that network, then open <b>http://htram.local</b> "
+       "(or find the monitor's address in your router).</p>";
+  h += code_box();
+  h += "<p class=m>If it cannot join, it opens the HTRAM-Setup network again after a while.</p>";
   server.send(200, "text/html", h);
-  delay(600);
+  delay(1500);  // let the page reach the phone before the access point goes away
   ESP.restart();
 }
 
 // ---------------------------------------------------------------------------
 // Networking
 // ---------------------------------------------------------------------------
+// The setup access point is a captive portal: every DNS name resolves to the
+// device, and the probe URLs phones use to detect one are redirected to the
+// setup page, so it opens by itself as soon as someone joins HTRAM-Setup.
 static void start_portal() {
   portal_mode = true;
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_AP_STA);  // STA side only for scanning nearby networks
   WiFi.softAP(SETUP_SSID, SETUP_PASS);
+  dns.setErrorReplyCode(DNSReplyCode::NoError);
+  dns.start(53, "*", WiFi.softAPIP());
+}
+
+static void redirect_to_setup() {
+  server.sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/setup");
+  server.send(302, "text/plain", "");
 }
 
 static void start_web() {
@@ -424,9 +479,13 @@ static void start_web() {
   server.on("/api/settings", handle_api_settings);
   server.on("/api/history", handle_history);
   server.on("/settings", handle_settings_page);
+  server.on("/show-code", HTTP_POST, handle_show_code);
   server.on("/setup", HTTP_GET, handle_setup_page);
   server.on("/setup", HTTP_POST, handle_setup_save);
-  server.onNotFound([]() { server.send(404, "text/plain", "not found"); });
+  server.onNotFound([]() {
+    if (portal_mode) redirect_to_setup();  // captive-portal probes and stray URLs
+    else server.send(404, "text/plain", "not found");
+  });
   server.begin();
   if (!portal_mode) MDNS.addService("http", "tcp", 80);  // HomeSpan owns mDNS itself
   web_started = true;
@@ -442,9 +501,16 @@ void setup() {
   wifi_ssid = prefs.getString("ssid", "");
   wifi_pass = prefs.getString("pass", "");
   String serial = prefs.getString("serial", "HTRAM");
+  bool fallback = prefs.getBool("portal_once", false);
   prefs.end();
 
-  if (!wifi_ssid.length()) {
+  if (!wifi_ssid.length() || fallback) {
+    if (fallback) {
+      prefs.begin("htram", false);
+      prefs.putBool("portal_once", false);
+      prefs.end();
+      portal_until = millis() + PORTAL_RETRY_MS;  // then retry the saved network
+    }
     start_portal();
     start_web();
     return;
@@ -461,8 +527,28 @@ void setup() {
 void loop() {
   // The GD32 link and HomeSpan each run in their own task.
   delay(2);
+  if (portal_mode) dns.processNextRequest();
   if (!web_started && homekit::network_ready()) start_web();
   if (web_started) server.handleClient();
+
+  // Not paired yet (or setting up): show the PIN on the device's screen once,
+  // so the setup code can be read without a browser or a serial cable.
+  static bool pin_shown_at_boot = false;
+  if (!pin_shown_at_boot && gd32::online() && (portal_mode || !homekit::paired())) {
+    pin_shown_at_boot = true;
+    gd32::show_pin(homekit::setup_pin(), 60000);
+  }
+
+  // Wi-Fi never came up: fall back to the setup portal for a while.
+  if (!portal_mode && !homekit::network_ready() && millis() > WIFI_GIVE_UP_MS) {
+    prefs.begin("htram", false);
+    prefs.putBool("portal_once", true);
+    prefs.end();
+    ESP.restart();
+  }
+  // Fallback portal left unused: try the saved network again.
+  if (portal_mode && portal_until && (int32_t)(millis() - portal_until) > 0 && !WiFi.softAPgetStationNum())
+    ESP.restart();
 
   // Remember the unit's serial number for the Home app's accessory record. The
   // GD32 announces it at power-on, before the accessory exists, so it takes

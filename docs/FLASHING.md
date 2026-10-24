@@ -34,7 +34,41 @@ esptool --chip esp32 --port COM19 --before no_reset --after no_reset write-flash
 
 Do not run `espefuse burn-*`. Fuses are permanent.
 
-## First flash
+## Prebuilt images
+
+Every [release](https://github.com/YoYoZ/htram-fw/releases) has:
+
+| File | Use |
+| --- | --- |
+| `htram-fw-X.Y.Z-full.bin` | **First flash** of a stock unit, one image at `0x0`. Erases Wi-Fi settings and Apple Home pairing, along with stock ESP-AT's leftovers. |
+| `htram-fw-X.Y.Z-ota.bin` | **Updates over Wi-Fi**; keeps everything. |
+| `htram-fw-X.Y.Z-parts.zip` | Updates over UART that keep settings. |
+| `c3-uart-bridge-b115200.bin` | The [C3 bridge](#the-esp32-c3-supermini-bridge), one image at `0x0`. `_swap`: TX and RX swapped. |
+| `SHA256SUMS` | Checksums. |
+
+You only need esptool (`pip install esptool`, which brings pyserial).
+
+```bash
+python tools/htram_reset.py COM19 boot                  # only with the C3 bridge
+sh tools/flash_htram.sh COM19 htram-fw-X.Y.Z-full.bin   # waits for download mode, then writes
+python tools/htram_reset.py COM19 run
+# power-cycle the monitor
+```
+
+With any other adapter, hold IO0 low, power-cycle the monitor and write the
+image yourself:
+
+```bash
+esptool --chip esp32 --port COM19 --before no_reset --after no_reset write-flash 0x0 htram-fw-X.Y.Z-full.bin
+```
+
+The bridge itself: hold the C3's BOOT button while plugging it in, then
+
+```bash
+esptool --chip esp32c3 --port COM20 write-flash 0x0 c3-uart-bridge-b115200.bin
+```
+
+## First flash, from source
 
 ```bash
 pio run -e htram
@@ -43,6 +77,10 @@ sh tools/flash_htram.sh COM19         # waits for download mode, then writes
 python tools/htram_reset.py COM19 run
 # power-cycle the monitor
 ```
+
+This writes the parts and leaves `nvs` alone, so it also works as a UART
+update that keeps settings. An unzipped release does the same:
+`sh tools/flash_htram.sh COM19 htram-fw-X.Y.Z-parts/`.
 
 **On Windows, keep the project in a short path** such as `C:\src\htram-fw`.
 Windows limits paths to 260 characters, and inside a deep folder the build
@@ -67,12 +105,21 @@ settings and pairing.
 
 The table can only be changed over UART. A unit first flashed with the default
 table keeps working and keeps accepting OTA updates while the image fits its
-1.25 MB slots; to switch, repeat the [first flash](#first-flash) once.
+1.25 MB slots; to switch, write the parts over UART once ([from source](#first-flash-from-source),
+or a release's `-parts`). That keeps settings and pairing.
 
 ## Later: over Wi-Fi
 
 ```bash
 HTRAM_OTA_PASS=<password> pio run -e htram_ota -t upload
+```
+
+Or a release's image, with
+[`espota.py`](https://github.com/espressif/arduino-esp32/blob/2.0.17/tools/espota.py)
+from Arduino-ESP32:
+
+```bash
+python espota.py -i htram.local -a <password> -f htram-fw-X.Y.Z-ota.bin
 ```
 
 The password is the admin password if you set one, otherwise the device's own,

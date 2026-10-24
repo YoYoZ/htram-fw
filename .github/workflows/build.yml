@@ -1,0 +1,106 @@
+# Builds the firmware and the C3 bridge on every push and pull request.
+# A tag vX.Y.Z (matching src/version.h) also drafts a GitHub release with
+# ready-to-flash images; see docs/FLASHING.md for how to use them.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write  # to publish releases
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ hashFiles('platformio.ini', 'tools/c3-uart-bridge/platformio.ini') }}
+
+      - name: Install PlatformIO and esptool
+        run: pip install platformio esptool
+
+      - name: Read version
+        id: version
+        run: |
+          v=$(sed -n 's/^#define HTRAM_FW_VERSION "\(.*\)"/\1/p' src/version.h)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF#refs/tags/v}" != "$v" ]]; then
+            echo "::error::tag ${GITHUB_REF#refs/tags/} does not match src/version.h ($v)"
+            exit 1
+          fi
+
+      - name: Build firmware
+        run: pio run -e htram
+
+      - name: Build C3 bridge
+        run: pio run -d tools/c3-uart-bridge -e b115200 -e b115200_swap
+
+      - name: Package
+        env:
+          V: ${{ steps.version.outputs.version }}
+        run: |
+          APP0=~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin
+          B=.pio/build/htram
+          mkdir -p dist/htram-fw-$V-parts
+
+          # First flash: one image from 0x0. It erases nvs (Wi-Fi settings,
+          # Apple Home pairing), which is what a stock unit needs.
+          python -m esptool --chip esp32 merge_bin -o dist/htram-fw-$V-full.bin \
+            --flash_mode dio --flash_freq 40m --flash_size 4MB \
+            0x1000 $B/bootloader.bin 0x8000 $B/partitions.bin \
+            0xe000 $APP0 0x10000 $B/firmware.bin
+
+          # Upgrades over UART that keep settings: the four parts, for
+          # tools/flash_htram.sh. Over Wi-Fi, firmware.bin alone.
+          cp $B/bootloader.bin $B/partitions.bin $APP0 dist/htram-fw-$V-parts/
+          cp $B/firmware.bin dist/htram-fw-$V-parts/firmware.bin
+          cp $B/firmware.bin dist/htram-fw-$V-ota.bin
+          (cd dist && zip -qr htram-fw-$V-parts.zip htram-fw-$V-parts && rm -r htram-fw-$V-parts)
+
+          for env in b115200 b115200_swap; do
+            C=tools/c3-uart-bridge/.pio/build/$env
+            python -m esptool --chip esp32c3 merge_bin -o dist/c3-uart-bridge-$env.bin \
+              --flash_mode dio --flash_freq 80m --flash_size 4MB \
+              0x0 $C/bootloader.bin 0x8000 $C/partitions.bin \
+              0xe000 $APP0 0x10000 $C/firmware.bin
+          done
+
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: htram-fw-${{ steps.version.outputs.version }}
+          path: dist/
+
+      # A draft: check the notes and files on GitHub, then press Publish.
+      - name: Draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            | File | Use |
+            | --- | --- |
+            | `htram-fw-${{ steps.version.outputs.version }}-full.bin` | **First flash** of a stock unit, at `0x0`. Erases Wi-Fi settings and Apple Home pairing. |
+            | `htram-fw-${{ steps.version.outputs.version }}-ota.bin` | **Update over Wi-Fi** (`espota`), keeps everything. |
+            | `htram-fw-${{ steps.version.outputs.version }}-parts.zip` | Update over UART with `tools/flash_htram.sh`, keeps everything. |
+            | `c3-uart-bridge-b115200.bin` | ESP32-C3 SuperMini as the flashing adapter, at `0x0`. |
+            | `c3-uart-bridge-b115200_swap.bin` | Same, with TX and RX swapped. |
+
+            How to flash: [docs/FLASHING.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/FLASHING.md#prebuilt-images).

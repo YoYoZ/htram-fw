@@ -59,12 +59,16 @@ Details: [hardware](docs/HARDWARE.md) · [protocol](docs/PROTOCOL.md) ·
 
 You need a 3.3 V USB-serial adapter (an ESP32-C3 SuperMini with
 [`tools/c3-uart-bridge`](tools/c3-uart-bridge) works great), a fine soldering
-iron, and [PlatformIO](https://platformio.org/).
+iron, and esptool (`pip install esptool`). [PlatformIO](https://platformio.org/)
+only if you build it yourself.
 
 1. **Solder** to the ESP32 module's edge pads: TXD0 (pin 35), RXD0 (pin 34),
    GND, and IO0 (pin 25). See [HARDWARE.md](docs/HARDWARE.md#esp32-wroom-32e-pins-that-matter).
 2. **Back up** the stock firmware — [FLASHING.md](docs/FLASHING.md#back-up-first).
-3. **Flash**: `pio run -e htram`, then [flash it](docs/FLASHING.md#first-flash).
+3. **Flash** `htram-fw-X.Y.Z-full.bin` from the
+   [latest release](https://github.com/YoYoZ/htram-fw/releases/latest) —
+   [how](docs/FLASHING.md#prebuilt-images). Or build it yourself:
+   [from source](docs/FLASHING.md#first-flash-from-source).
 4. **Power on** the monitor (hold its button two seconds). It opens a Wi-Fi
    network **HTRAM-Setup** (password `htram-setup`). Join it and the setup page
    opens by itself (or go to <http://192.168.4.1>). It shows your **Apple Home

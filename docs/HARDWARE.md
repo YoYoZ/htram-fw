@@ -8,10 +8,10 @@ project's internal codename. Board fab: FASTPCB, 2021.
 
 | Ref | Part | Role |
 | --- | --- | --- |
-| U8 | GigaDevice **GD32F150** (Cortex-M3, LQFP48) | Main controller: sensor, display, LEDs, buzzer, buttons, battery |
-| — | Winbond 25Q-series SPI flash (SOIC-8) | Next to the GD32; almost certainly display graphics and fonts |
+| U8 | GigaDevice **GD32F150C8T6** (Cortex-M3, 72 MHz, 64 KB flash, 8 KB RAM, LQFP48) | Main controller: sensor, display, LEDs, buzzer, buttons, battery |
+| — | Winbond **W25Q32JV** (4 MB SPI flash, SOIC-8, date code 2106) | Next to the GD32; display graphics and fonts, and the history log (the protocol reads it at 0x200000–0x300000) |
 | — | Espressif **ESP32-WROOM-32E** (ESP32-D0WD-V3 rev 3.0, 4 MB flash) | Radio only. Ships with stock **ESP-AT v2.1.0.0-rc2** |
-| J6 | 4-pin header | CO2 sensor module (NDIR, metal can under a clear housing) |
+| J6 | 4-pin header | CO2 sensor: Honeywell **CRIR-M1** NDIR (C06-0801-000) |
 | J3 | FPC connector | Display |
 | LED1–7 | | Status and traffic-light LEDs |
 | LS1 | | Buzzer |
@@ -22,10 +22,21 @@ The GD32 is the brain. It drives the ESP32 purely as an AT-command modem over
 a serial link and **switches the ESP32's power itself** — hold the device
 button for two seconds and the GD32 powers the module up.
 
+The screen redraws line by line over two to three seconds. With 8 KB of RAM
+the GD32 cannot hold a frame (even a 240×240 16-bit frame would be about
+115 KB), so it most likely streams graphics from the Winbond flash to the
+panel piece by piece, far below what its SPI hardware could do.
+
 ## ESP32-WROOM-32E pins that matter
 
 With the antenna pointing up, pins are numbered down the left side (1–14),
 along the bottom (15–24) and up the right side (25–38).
+
+![ESP32-WROOM-32E pads on the HTRAM board, all 38 labelled](img/esp32-pinout.jpg)
+
+*Stitched from four microscope photos of a real unit. Solder left over from
+flashing marks pins 25, 34 and 35, and from sniffing the AT link, 27 and 28.
+Pins 1 and 2 are hidden in the corner and placed from their opposites.*
 
 | Module pin | Signal | Use |
 | --- | --- | --- |

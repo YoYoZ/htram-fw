@@ -44,6 +44,17 @@ python tools/htram_reset.py COM19 run
 # power-cycle the monitor
 ```
 
+**On Windows, keep the project in a short path** such as `C:\src\htram-fw`.
+Windows limits paths to 260 characters, and inside a deep folder the build
+fails with "No such file or directory" for HomeSpan headers that plainly
+exist. If moving it is not an option, build elsewhere and point the flash
+script there:
+
+```bash
+PLATFORMIO_BUILD_DIR=C:/pio/build PLATFORMIO_LIBDEPS_DIR=C:/pio/libdeps pio run -e htram
+HTRAM_BUILD_DIR=C:/pio/build/htram sh tools/flash_htram.sh COM19
+```
+
 If a flash is interrupted after the bootloader region was erased, the module
 will not boot — but download mode lives in mask ROM, so just flash again.
 

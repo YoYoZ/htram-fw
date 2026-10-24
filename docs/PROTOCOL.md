@@ -68,10 +68,10 @@ own. Found the hard way:
 
 | Sent | Screen |
 | --- | --- |
-| `<CR><LF>+BLESECNTFYKEY:0,785877` | `0 7858` (the leading line break shifts it by two; the comma draws as a blank) |
+| `<CR><LF>+BLESECNTFYKEY:0,123456` | `0 1234` (the leading line break shifts it by two; the comma draws as a blank) |
 | same, right behind the `OK` for `AT+BLEENC` | PIN screen with no digits |
-| `<CR><LF>+BLESECNTFYKEY:785877,0` | nothing |
-| `+BLESECNTFYKEY:0,785877`, after 50 ms of silence | `785877` |
+| `<CR><LF>+BLESECNTFYKEY:123456,0` | nothing |
+| `+BLESECNTFYKEY:0,123456`, after 50 ms of silence | `123456` |
 
 So: no leading line break, and a quiet gap before it so it is not run
 together with the preceding output.

@@ -137,13 +137,29 @@ static void announce_ready() {
   last_command_at = 0;
 }
 
+// The GD32 does not parse the passkey line: it shows the six bytes at offset
+// 17 of whatever burst of serial data the line arrived in, which is where the
+// key sits in ESP-AT's own "+BLESECNTFYKEY:0,123456". So the line has to start
+// a burst of its own: no leading line break, and a quiet gap before it so it
+// is not run together with the "OK" sent just before.
+static const uint32_t PIN_GAP_MS = 50;
+static uint32_t pin_send_at = 0;
+
 // Reports the passkey if one is waiting, and keeps pairing open while it shows.
 static void maybe_show_pin() {
   if (!pin_pending || pin_shown) return;
   pin_shown = true;
   pin_pending = false;
-  AT.printf("\r\n+BLESECNTFYKEY:0,%06lu\r\n", (unsigned long)pin_value);
+  AT.flush();
+  pin_send_at = millis() + PIN_GAP_MS;
   pair_at = millis() + pin_hold_ms;
+}
+
+static void send_pin_if_due() {
+  if (!pin_send_at || since(pin_send_at) < 0) return;
+  pin_send_at = 0;
+  AT.printf("+BLESECNTFYKEY:0,%06lu\r\n", (unsigned long)pin_value);
+  AT.flush();
 }
 
 // Reports the client dropping off and, a moment later, connecting again.
@@ -429,6 +445,8 @@ static void service() {
     // schedules pair_at. Do not wait forever if it does not.
     pair_at = millis() + 3000;
   }
+
+  send_pin_if_due();
 
   if (phase == PHASE_PAIRING && pair_at && since(pair_at) >= 0) {
     if (pin_pending && !pin_shown) {

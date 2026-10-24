@@ -46,7 +46,7 @@ ESP32  +BLECFGMTU:0,247
 ESP32  +WRITE:0,2,1,1,2,<01 00>        client enables notifications on Read-Data
 ```
 
-### Showing a number on the device's screen (unconfirmed)
+### Showing a number on the device's screen
 
 The GD32 declares itself display-only for Bluetooth pairing (the `0` in
 `AT+BLESECPARAM=1,0,16,3,3`), and the manual has users type "the PIN CODE
@@ -58,8 +58,23 @@ ESP32  +BLESECNTFYKEY:0,123456
 ```
 
 htram-fw sends that during a (re)pairing, after `AT+BLEENC`, and holds off
-`+BLEAUTHCMPL` for a minute so the number stays up. The re-pairing itself is
-confirmed to work; whether the GD32 draws the number has not been checked yet.
+`+BLEAUTHCMPL` for a minute so the number stays up. Confirmed on hardware: the
+screen shows "PIN CODE" and the six digits.
+
+The GD32 does not parse that line. It shows **the six bytes at offset 17 of
+the burst of serial data the line arrived in**, which is where the key sits
+when the line is exactly `+BLESECNTFYKEY:0,` + key and starts a burst of its
+own. Found the hard way:
+
+| Sent | Screen |
+| --- | --- |
+| `<CR><LF>+BLESECNTFYKEY:0,785877` | `0 7858` (the leading line break shifts it by two; the comma draws as a blank) |
+| same, right behind the `OK` for `AT+BLEENC` | PIN screen with no digits |
+| `<CR><LF>+BLESECNTFYKEY:785877,0` | nothing |
+| `+BLESECNTFYKEY:0,785877`, after 50 ms of silence | `785877` |
+
+So: no leading line break, and a quiet gap before it so it is not run
+together with the preceding output.
 
 ### A request and its reply
 

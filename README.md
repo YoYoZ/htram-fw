@@ -172,8 +172,7 @@ and — until the accessory is paired — the status page all show it. The
 firmware also asks the monitor to show the six digits on its own screen as a
 Bluetooth pairing PIN, once after boot while unpaired and whenever you press
 *Show it on the monitor's screen* (readings pause for that minute).
-*This on-screen PIN is not yet confirmed on real hardware.* HomeKit runs on
-TCP 1201; port 80 stays with the JSON API.
+HomeKit runs on TCP 1201; port 80 stays with the JSON API.
 
 **"No Response" right after pairing** almost always means your home hub (Apple
 TV, HomePod) is on a different subnet and cannot see the accessory's Bonjour

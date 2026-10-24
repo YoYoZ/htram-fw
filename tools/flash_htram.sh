@@ -7,7 +7,7 @@
 #   python tools/htram_reset.py COM19 run
 set -e
 PORT=${1:-COM19}
-B=.pio/build/htram
+B=${HTRAM_BUILD_DIR:-.pio/build/htram}
 APP0="$USERPROFILE/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
 
 echo "== waiting for download mode on $PORT (power-cycle the monitor now)"

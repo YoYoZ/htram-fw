@@ -120,17 +120,17 @@ struct Co2Sensor : Service::CarbonDioxideSensor {
 
 // A switch mirroring one of the device's own settings. Changes from the Home
 // app are written to the device; changes made elsewhere (web page, API) flow
-// back within a few seconds.
+// back within a few seconds. Each lives in its own bridged accessory, which is
+// where its name comes from.
 struct SettingSwitch : Service::Switch {
   SpanCharacteristic *on;
   bool (*get)(const device::Settings &);
   bool (*set)(bool);
   uint32_t last_sync = 0;
 
-  SettingSwitch(const char *name, bool (*g)(const device::Settings &), bool (*s)(bool))
+  SettingSwitch(bool (*g)(const device::Settings &), bool (*s)(bool))
       : Service::Switch(), get(g), set(s) {
     on = new Characteristic::On(0);
-    new Characteristic::Name(name);
   }
 
   boolean update() override { return set(on->getNewVal<bool>()); }
@@ -237,7 +237,11 @@ void begin(const String &ssid, const String &pass, const String &serial, const S
   ota = ota_pass;
   homeSpan.enableOTA(ota.c_str());
 
-  homeSpan.begin(Category::Sensors, "HTRAM CO2 Monitor", HOSTNAME, "HTRAM-V1-W");
+  // Presented as a bridge rather than one accessory with many services: the
+  // Home app names every tile of a single accessory after the accessory
+  // itself, so two switches both read "HTRAM CO2 Monitor" and neither says
+  // what it does. Each accessory of a bridge carries its own name.
+  homeSpan.begin(Category::Bridges, "HTRAM", HOSTNAME, "HTRAM-V1-W");
   started = true;
 
   // Set the setup code once per device; it takes a few seconds to compute.
@@ -250,25 +254,37 @@ void begin(const String &ssid, const String &pass, const String &serial, const S
   }
   prefs.end();
 
-  new SpanAccessory();
-  new Service::AccessoryInformation();
-  new Characteristic::Identify();
-  new Characteristic::Name("HTRAM CO2 Monitor");
-  new Characteristic::Manufacturer("Honeywell");
-  new Characteristic::Model("HTRAM-V1-W");
-  new Characteristic::SerialNumber(serial.c_str());
-  new Characteristic::FirmwareRevision(HTRAM_FW_VERSION);
+  // One accessory of the bridge. `suffix` keeps serial numbers unique, which
+  // HomeKit needs to tell the accessories apart.
+  auto accessory = [&serial](const char *name, const char *suffix) {
+    new SpanAccessory();
+    new Service::AccessoryInformation();
+    new Characteristic::Identify();
+    new Characteristic::Name(name);
+    new Characteristic::Manufacturer("Honeywell");
+    new Characteristic::Model("HTRAM-V1-W");
+    new Characteristic::SerialNumber((serial + suffix).c_str());
+    new Characteristic::FirmwareRevision(HTRAM_FW_VERSION);
+  };
 
+  accessory("HTRAM", "");  // the bridge itself; does not appear in the Home app
+
+  // The readings stay together: the Home app folds a sensor-only accessory
+  // into one tile and summarises it ("980 ppm, 21 degrees, 57% humidity").
+  accessory("HTRAM CO2 Monitor", "-sensors");
   new Co2Sensor();
   new TemperatureSensor();
   new HumiditySensor();
   new Battery();
-  new SettingSwitch(
-      "Alarm Sound", [](const device::Settings &s) { return s.alarm_sound; },
-      [](bool on) { return device::set_alarm_sound(on); });
-  new SettingSwitch(
-      "Display Auto-Off", [](const device::Settings &s) { return s.screen_off_s > 0; },
-      [](bool on) { return device::set_screen_off(on ? 120 : 0); });
+
+  // The switches are separate accessories, so each gets its own name.
+  accessory("HTRAM Alarm Sound", "-alarm");
+  new SettingSwitch([](const device::Settings &s) { return s.alarm_sound; },
+                    [](bool on) { return device::set_alarm_sound(on); });
+
+  accessory("HTRAM Display Auto-Off", "-display");
+  new SettingSwitch([](const device::Settings &s) { return s.screen_off_s > 0; },
+                    [](bool on) { return device::set_screen_off(on ? 120 : 0); });
 
   homeSpan.autoPoll();
 }

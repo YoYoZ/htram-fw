@@ -152,14 +152,19 @@ Only sessions that never saw a sync keep untrusted timestamps.
 In the Home app: **Add Accessory → More options**, pick *HTRAM CO2 Monitor*,
 enter the setup code from the status page.
 
-- **CO2 sensor** — ppm, peak, and *CO2 detected* from the device's yellow
-  threshold for its activity level (clears 100 ppm below). Force a fixed level
-  with `-DHTRAM_CO2_ALERT_PPM=1200`.
-- **Temperature**, **humidity**, **battery** (level, charging, low).
-- **Alarm Sound** and **Display Auto-Off** switches, kept in step with the
-  device and the web settings.
-- A **fault** flag when the main board stops answering or a reading is more
-  than a minute old.
+It appears as a **bridge** with three accessories, so each one has a name of
+its own (the Home app names every tile of a single accessory after the
+accessory itself, which would leave the two switches indistinguishable):
+
+- **HTRAM CO2 Monitor** — CO2 (ppm, peak, and *CO2 detected* from the device's
+  yellow threshold for its activity level, clearing 100 ppm below; override
+  with `-DHTRAM_CO2_ALERT_PPM=1200`), temperature, humidity and battery
+  (level, charging, low). A **fault** flag appears when the main board stops
+  answering or a reading is more than a minute old.
+- **HTRAM Alarm Sound** — the buzzer, on or off.
+- **HTRAM Display Auto-Off** — screen off after 2 minutes, or always on.
+
+Both switches stay in step with the device and the web settings page.
 
 Each unit gets its own setup code, derived from its MAC address: six digits
 followed by `00` (for example `123-45-600`). The setup page, the "saved" page

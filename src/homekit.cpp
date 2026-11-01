@@ -7,8 +7,16 @@
 #include "gd32_link.h"
 #include "version.h"
 
-static const char *HOSTNAME = "htram";
 static const uint16_t HAP_PORT = 1201;  // port 80 stays with the JSON API
+
+// The last two bytes of the MAC, "4580", as the unit's short ID. HomeSpan's
+// own suffix is the full accessory ID, which makes an unwieldy hostname.
+static String unit_id() {
+  uint64_t mac = ESP.getEfuseMac();  // byte 0 of the MAC is the lowest byte
+  char b[5];
+  snprintf(b, sizeof(b), "%02x%02x", (unsigned)((mac >> 32) & 0xff), (unsigned)((mac >> 40) & 0xff));
+  return String(b);
+}
 
 // "CO2 detected" turns on where the device's own display turns yellow (the
 // threshold of its activity level) and off again 100 ppm below, so a reading
@@ -212,6 +220,8 @@ String setup_code() {
   return c.substring(0, 3) + "-" + c.substring(3, 5) + "-" + c.substring(5);
 }
 
+String hostname() { return "htram-" + unit_id(); }
+
 bool network_ready() { return wifi_up; }
 
 uint32_t setup_pin() { return pin6(); }
@@ -241,7 +251,15 @@ void begin(const String &ssid, const String &pass, const String &serial, const S
   // Home app names every tile of a single accessory after the accessory
   // itself, so two switches both read "HTRAM CO2 Monitor" and neither says
   // what it does. Each accessory of a bridge carries its own name.
-  homeSpan.begin(Category::Bridges, "HTRAM", HOSTNAME, "HTRAM-V1-W");
+  //
+  // Name and hostname carry the unit ID: two monitors announcing the same
+  // Bonjour name on one network would hide each other. HomeSpan keeps the
+  // pointers, hence static. Renaming keeps an existing pairing, which HomeKit
+  // ties to the accessory ID, not the name.
+  static String name, host;
+  name = "HTRAM " + unit_id();
+  host = hostname();
+  homeSpan.begin(Category::Bridges, name.c_str(), host.c_str(), "HTRAM-V1-W");
   started = true;
 
   // Set the setup code once per device; it takes a few seconds to compute.
@@ -267,7 +285,7 @@ void begin(const String &ssid, const String &pass, const String &serial, const S
     new Characteristic::FirmwareRevision(HTRAM_FW_VERSION);
   };
 
-  accessory("HTRAM", "");  // the bridge itself; does not appear in the Home app
+  accessory(name.c_str(), "");  // the bridge itself; does not appear in the Home app
 
   // The readings stay together: the Home app folds a sensor-only accessory
   // into one tile and summarises it ("980 ppm, 21 degrees, 57% humidity").

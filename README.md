@@ -9,7 +9,7 @@ screen. This firmware replaces only the ESP32 radio module inside it and puts
 the readings on your network:
 
 ```
-$ curl http://htram.local/api/data
+$ curl http://htram-xxxx.local/api/data
 {"online":true,"valid":true,"warming_up":false,"co2":1200,"temperature":21,
  "humidity":57,"battery":4,"battery_percent":100,"charging":false,
  "age_seconds":2,"level":"yellow","activity":"low","yellow_ppm":800,
@@ -73,7 +73,10 @@ only if you build it yourself.
    network **HTRAM-Setup** (password `htram-setup`). Join it and the setup page
    opens by itself (or go to <http://192.168.4.1>). It shows your **Apple Home
    setup code** — note it — and lets you pick your network.
-5. Open <http://htram.local> for the readings.
+5. Open <http://htram-xxxx.local> for the readings. Each monitor has its own
+   address, `xxxx` being the last four hex digits of its MAC address; the
+   "saved" page tells you which, and every status page shows it at the bottom.
+   Several monitors can share a network.
 
 If the monitor cannot join the network (wrong password, router gone), it
 reopens **HTRAM-Setup** after three minutes and tries the saved network again
@@ -130,17 +133,17 @@ signals shared air sooner, so the alarm comes earlier.
 ### Changing settings
 
 ```bash
-curl -X POST http://htram.local/api/settings -d activity=medium
-curl -X POST http://htram.local/api/settings -d "yellow=900&red=1300"   # custom
-curl -X POST http://htram.local/api/settings -d screen_off=120          # 0 = always on
-curl -X POST http://htram.local/api/settings -d alarm_sound=0
-curl -X POST http://htram.local/api/settings -d unit=F
+curl -X POST http://htram-xxxx.local/api/settings -d activity=medium
+curl -X POST http://htram-xxxx.local/api/settings -d "yellow=900&red=1300"   # custom
+curl -X POST http://htram-xxxx.local/api/settings -d screen_off=120          # 0 = always on
+curl -X POST http://htram-xxxx.local/api/settings -d alarm_sound=0
+curl -X POST http://htram-xxxx.local/api/settings -d unit=F
 ```
 
 ### History
 
 ```bash
-curl "http://htram.local/api/history?minutes=1440&format=csv" > today.csv
+curl "http://htram-xxxx.local/api/history?minutes=1440&format=csv" > today.csv
 ```
 
 One record per minute, read straight from the device's flash (about 5 s per
@@ -153,8 +156,8 @@ Only sessions that never saw a sync keep untrusted timestamps.
 
 ## Apple Home
 
-In the Home app: **Add Accessory → More options**, pick *HTRAM CO2 Monitor*,
-enter the setup code from the status page.
+In the Home app: **Add Accessory → More options**, pick *HTRAM xxxx* (the
+same four digits as its address), enter the setup code from the status page.
 
 It appears as a **bridge** with three accessories, so each one has a name of
 its own (the Home app names every tile of a single accessory after the
@@ -188,7 +191,7 @@ announcements — see [NETWORKING.md](docs/NETWORKING.md).
 sensor:
   - platform: rest
     name: HTRAM CO2
-    resource: http://htram.local/api/data
+    resource: http://htram-xxxx.local/api/data
     scan_interval: 10
     value_template: "{{ value_json.co2 }}"
     unit_of_measurement: ppm

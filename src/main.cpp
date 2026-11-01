@@ -419,6 +419,7 @@ static void handle_diag() {
   j += ",\"wifi\":{\"mode\":\"" + String(portal_mode ? "setup portal" : "station") + "\"";
   if (!portal_mode) j += ",\"ssid\":\"" + WiFi.SSID() + "\",\"rssi\":" + String(WiFi.RSSI()) +
                          ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
+  j += ",\"hostname\":\"" + homekit::hostname() + ".local\"";
   j += "},\"homekit_paired\":" + String(homekit::paired() ? "true" : "false");
   j += ",\"link\":{\"online\":" + String(gd32::online() ? "true" : "false");
   j += ",\"requests\":" + String(s.requests) + ",\"replies\":" + String(s.replies);
@@ -458,7 +459,7 @@ static void handle_root() {
     h += "<tr><td>Reading age</td><td>" + String((millis() - r.millis_at) / 1000) +
          " s</td></tr>";
   }
-  h += "</table><p class=m>htram-fw " HTRAM_FW_VERSION " &middot; up " + String(millis() / 1000) +
+  h += "</table><p class=m>" + homekit::hostname() + ".local &middot; htram-fw " HTRAM_FW_VERSION " &middot; up " + String(millis() / 1000) +
        " s since " + reset_reason() + " &middot; " + String(s.replies) + " of " + String(s.requests) +
        " readings answered";
   if (s.bad_frames) h += ", " + String(s.bad_frames) + " bad frames";
@@ -560,7 +561,7 @@ static void handle_setup_save() {
 
   String h = PAGE_HEAD;
   h += "<title>HTRAM</title><h1>Saved</h1><p>The monitor restarts and joins <b>" + escape(ssid) +
-       "</b>. Put your phone back on that network, then open <b>http://htram.local</b> "
+       "</b>. Put your phone back on that network, then open <b>http://" + homekit::hostname() + ".local</b> "
        "(or find the monitor's address in your router).</p>";
   h += code_box();
   h += "<p class=m>If it cannot join, it opens the HTRAM-Setup network again after a while.</p>";
@@ -640,7 +641,7 @@ void setup() {
   // HomeSpan logs to UART0 but leaves starting it to the sketch.
   Serial.begin(115200);
 
-  // From here HomeSpan runs Wi-Fi, mDNS (htram.local) and OTA updates in its
+  // From here HomeSpan runs Wi-Fi, mDNS (htram-xxxx.local) and OTA updates in its
   // own task, reconnecting by itself if the network drops.
   homekit::begin(wifi_ssid, wifi_pass, serial, ota_password());
 }

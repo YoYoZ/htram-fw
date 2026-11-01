@@ -1,8 +1,9 @@
 // Apple Home support, via HomeSpan.
 //
-// The monitor appears in the Home app as one accessory with a CO2 sensor,
-// a temperature sensor, a humidity sensor and a battery. HomeSpan runs in its
-// own task and owns Wi-Fi, mDNS and over-the-air updates once started.
+// The monitor appears in the Home app as a bridge: the sensors (CO2,
+// temperature, humidity, battery) and two switches (alarm sound, display
+// auto-off). HomeSpan runs in its own task and owns Wi-Fi, mDNS and
+// over-the-air updates once started.
 #pragma once
 
 #include <Arduino.h>
@@ -13,6 +14,11 @@ namespace homekit {
 // information record; `ota_pass` protects over-the-air updates. Returns once
 // HomeSpan's task is running.
 void begin(const String &ssid, const String &pass, const String &serial, const String &ota_pass);
+
+// This unit's network name, "htram-4580" (the last two bytes of its MAC), so
+// several monitors can share a network. Reachable as <hostname>.local; the
+// Home app shows it as "HTRAM 4580".
+String hostname();
 
 // True once HomeSpan has brought Wi-Fi up for the first time.
 bool network_ready();

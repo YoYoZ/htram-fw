@@ -111,7 +111,7 @@ or a release's `-parts`). That keeps settings and pairing.
 ## Later: over Wi-Fi
 
 ```bash
-HTRAM_OTA_PASS=<password> pio run -e htram_ota -t upload
+HTRAM_HOST=htram-xxxx.local HTRAM_OTA_PASS=<password> pio run -e htram_ota -t upload
 ```
 
 Or a release's image, with
@@ -119,7 +119,7 @@ Or a release's image, with
 from Arduino-ESP32:
 
 ```bash
-python espota.py -i htram.local -a <password> -f htram-fw-X.Y.Z-ota.bin
+python espota.py -i htram-xxxx.local -a <password> -f htram-fw-X.Y.Z-ota.bin
 ```
 
 The password is the admin password if you set one, otherwise the device's own,

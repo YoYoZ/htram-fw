@@ -34,6 +34,27 @@ esptool --chip esp32 --port COM19 --before no_reset --after no_reset write-flash
 
 Do not run `espefuse burn-*`. Fuses are permanent.
 
+## One command
+
+```bash
+pip install esptool
+python tools/htram_flash.py
+```
+
+It asks for the COM port, then does everything: downloads the latest
+release and checks it, puts the ESP32 into download mode (the C3 bridge holds
+IO0 for you; with another adapter it tells you when to ground it), backs up
+the stock flash, writes, checks the first boot, and prints the unit's setup
+network, address, Apple Home code and OTA password. `--keep-settings` updates
+an already converted unit without erasing Wi-Fi and pairing.
+
+**Why a script:** download mode only exists from a power-up with IO0 low,
+and the HTRAM's main board cuts the ESP32's power after a few minutes there.
+A backup then succeeds and the write that follows fails with *No serial data
+received*, which looks like a wiring fault but only needs another
+power-cycle. The script checks that the chip answers before every step and
+asks for that power-cycle when it does not.
+
 ## Prebuilt images
 
 Every [release](https://github.com/YoYoZ/htram-fw/releases) has:

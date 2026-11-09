@@ -15,6 +15,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Ed25519 seed that signs update manifests (src/update_key.h is its
+      # public half). Without it, releases still build but devices will not
+      # update from them by themselves.
+      HTRAM_SIGNING_KEY: ${{ secrets.HTRAM_SIGNING_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +35,7 @@ jobs:
           key: pio-${{ hashFiles('platformio.ini', 'tools/c3-uart-bridge/platformio.ini') }}
 
       - name: Install PlatformIO and esptool
-        run: pip install platformio esptool
+        run: pip install platformio esptool cryptography
 
       - name: Read version
         id: version
@@ -78,6 +83,17 @@ jobs:
               0xe000 $APP0 0x10000 $C/firmware.bin
           done
 
+          # The manifest devices update from (src/updater.cpp). Its name has no
+          # version, so .../releases/latest/download/htram-fw-ota.json always
+          # finds the newest one.
+          if [ -n "$HTRAM_SIGNING_KEY" ]; then
+            python tools/sign_release.py dist/htram-fw-$V-ota.bin $V \
+              "https://github.com/${{ github.repository }}/releases/download/v$V/htram-fw-$V-ota.bin" \
+              > dist/htram-fw-ota.json
+          else
+            echo "::warning::HTRAM_SIGNING_KEY is not set: no htram-fw-ota.json, devices will not auto-update to this build"
+          fi
+
           (cd dist && sha256sum * > SHA256SUMS)
           ls -l dist
 
@@ -99,6 +115,7 @@ jobs:
             | --- | --- |
             | `htram-fw-${{ steps.version.outputs.version }}-full.bin` | **First flash** of a stock unit, at `0x0`. Erases Wi-Fi settings and Apple Home pairing. |
             | `htram-fw-${{ steps.version.outputs.version }}-ota.bin` | **Update over Wi-Fi** (`espota`), keeps everything. |
+            | `htram-fw-ota.json` | Signed manifest monitors on 1.4.0+ update from by themselves. |
             | `htram-fw-${{ steps.version.outputs.version }}-parts.zip` | Update over UART with `tools/flash_htram.sh`, keeps everything. |
             | `c3-uart-bridge-b115200.bin` | ESP32-C3 SuperMini as the flashing adapter, at `0x0`. |
             | `c3-uart-bridge-b115200_swap.bin` | Same, with TX and RX swapped. |

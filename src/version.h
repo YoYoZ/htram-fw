@@ -2,4 +2,6 @@
 // /api/data and /api/diag, and as the Apple Home accessory's firmware revision.
 #pragma once
 
-#define HTRAM_FW_VERSION "1.3.0"
+#ifndef HTRAM_FW_VERSION  // test builds pass their own with -D
+#define HTRAM_FW_VERSION "1.4.0"
+#endif

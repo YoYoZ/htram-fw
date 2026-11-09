@@ -146,10 +146,25 @@ python espota.py -i htram-xxxx.local -a <password> -f htram-fw-X.Y.Z-ota.bin
 The password is the admin password if you set one, otherwise the device's own,
 shown on its `/setup` page.
 
-**There is no automatic rollback.** The Arduino bootloader boots whatever was
-written last, so an update that crashes at startup needs the UART wires to
-recover. Test risky changes on the bench, or keep the wires on until you trust
-a build.
+**Rollback (1.4.0 and later).** A new image, however it arrived, starts out
+provisional: it confirms itself once the main board answers and the network
+or setup portal is up, normally within half a minute. If it reboots or hangs
+before that, or has not confirmed itself after 5 minutes, the bootloader
+returns to the previous image. An image that breaks only after confirming
+itself, or a build without the updater (1.3.0 and older), still needs the
+UART wires to recover, so test risky changes on the bench.
+
+## Automatic updates
+
+From 1.4.0 the firmware updates itself from this repository's releases; see
+[the README](../README.md#updates). Releases are only installed if their
+manifest carries a valid signature from the key in the repository's secrets.
+
+For a fork, generate your own key, put its public half in `src/update_key.h`,
+the private half (64 hex digits, the Ed25519 seed) in your fork's
+`HTRAM_SIGNING_KEY` secret, and build with `-DHTRAM_UPDATE_REPO='"you/your-fork"'`.
+`tools/sign_release.py` signs by hand; `-DHTRAM_UPDATE_MANIFEST` points a test
+build at your own server.
 
 ## The ESP32-C3 SuperMini bridge
 

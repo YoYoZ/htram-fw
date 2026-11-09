@@ -26,7 +26,8 @@ $ curl http://htram-xxxx.local/api/data
   the time on every power loss.
 - **JSON API**, **CSV history export**, **Prometheus metrics**, a status page
   with a 24-hour chart, and a settings page.
-- **Over-the-air updates** after the first flash.
+- **Updates itself** from this repository's releases: signed, and it rolls
+  back by itself if a new version does not come up properly.
 - No cloud, no account, no MQTT.
 
 The display, alarm, LEDs and buttons keep working exactly as before: they run
@@ -95,6 +96,7 @@ backup restores the original firmware at any time.
 | `GET /api/history?minutes=1440` | the device's own log, JSON; add `&format=csv` |
 | `GET /metrics` | Prometheus text format, including risk level and thresholds |
 | `GET /api/diag` | firmware version, uptime, reset reason, Wi-Fi, link counters, clock sync |
+| `GET /api/update` | update state: current and latest version, progress, provisional or confirmed; `POST action=check\|install`, `auto=0\|1` |
 | `/` | status page with a 24 h chart and the Apple Home setup code |
 | `/settings` | device settings form |
 | `/setup` | change Wi-Fi credentials |
@@ -155,6 +157,27 @@ again at 2021-01-01; once it has been synced, the records of that session are
 shifted to real time (accurate to about a minute) and marked `time_estimated`.
 Only sessions that never saw a sync keep untrusted timestamps.
 
+## Updates
+
+From 1.4.0 the monitor keeps itself up to date. Once a day (spread over an
+hour per unit) it looks at this repository's latest release; the status page
+shows what it found, with *Check now* / *Install now*. In **Device settings**
+choose between installing automatically (the default) and only being told.
+
+- **Only signed releases.** Each release has `htram-fw-ota.json`: version,
+  size and SHA-256, signed in CI with a key that lives only in the
+  repository's secrets. The firmware checks the signature before downloading
+  and the hash before switching over; anything else is not installed.
+- **Rollback.** A new version is provisional until the main board answers and
+  the network is up. If it reboots or hangs first, or has not managed within
+  5 minutes, the monitor goes back to the version it had and does not install
+  that one again by itself (*Install now* still can).
+- Settings, Wi-Fi and the Apple Home pairing are untouched.
+
+Units on 1.3.0 or older need one last manual update to get there:
+`python espota.py -i htram-xxxx.local -a <OTA password> -f htram-fw-1.4.0-ota.bin`
+([details](docs/FLASHING.md#later-over-wi-fi)).
+
 ## Apple Home
 
 In the Home app: **Add Accessory → More options**, pick *HTRAM xxxx* (the
@@ -209,6 +232,7 @@ sensor:
 | `HTRAM_RAW_API` | 0 | `/api/raw` protocol access (developer builds) |
 | `HTRAM_HOMESPAN_LOG` | 0 | HomeSpan log level on UART0 (1–2 to debug HomeKit) |
 | `HTRAM_RTS_PIN` | -1 | enable RTS flow control on the AT link if a board needs it |
+| `HTRAM_UPDATE_REPO` | `YoYoZ/htram-fw` | where updates come from (forks: see [FLASHING.md](docs/FLASHING.md#automatic-updates)) |
 
 ## Repository
 
@@ -217,8 +241,12 @@ src/                    firmware (PlatformIO, Arduino-ESP32 2.0, HomeSpan 1.9)
   gd32_link.*           ESP-AT stand-in on the serial link to the main board
   device.*              settings, clock, history over the Honeywell protocol
   homekit.*             Apple Home accessory
+  updater.*             signed updates from GitHub releases, rollback
+  update_key.h          public key releases are signed with
   main.cpp              Wi-Fi setup, web API and pages
 tools/c3-uart-bridge/   ESP32-C3 USB-serial bridge, IO0 control, AT sniffer, BLE client
+tools/htram_flash.py    one-command first flash
+tools/sign_release.py   signs the update manifest (CI uses it)
 tools/*.py              frame builder, flash dumpers, boot-mode control, mDNS and history probes
 docs/                   hardware, protocol, flashing, networking notes
 ```

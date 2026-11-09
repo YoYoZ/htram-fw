@@ -34,6 +34,7 @@
 #include "device.h"
 #include "gd32_link.h"
 #include "homekit.h"
+#include "updater.h"
 #include "version.h"
 
 static const char *SETUP_SSID = "HTRAM-Setup";
@@ -293,6 +294,14 @@ static void handle_settings_page() {
   h += String("<option value=F") + (s.fahrenheit ? " selected>" : ">") + "&deg;F</option>";
   h += "</select><button>Save</button></form>";
 
+  h += "<form method=POST action=/update><label>Firmware updates from GitHub</label><select name=auto "
+       "style='width:100%;padding:.5rem;margin:.3rem 0 .9rem'>";
+  h += String("<option value=1") + (updater::auto_install() ? " selected>" : ">") +
+       "Install automatically (signed releases only; rolls back if one fails)</option>";
+  h += String("<option value=0") + (updater::auto_install() ? ">" : " selected>") +
+       "Only tell me on the status page</option>";
+  h += "</select><input type=hidden name=back value=/settings><button>Save</button></form>";
+
   h += "<p class=m>Serial " + escape(s.serial) + " &middot; main board firmware " + escape(s.firmware) +
        " &middot; clock " + (s.clock_synced_at ? "synced" : "not synced yet") +
        "<br><a href=/>Back</a> &middot; <a href=/api/history?minutes=1440&format=csv>last 24 h as CSV</a></p>";
@@ -468,6 +477,7 @@ static void handle_root() {
   if (!portal_mode) h += ", Wi-Fi " + String(WiFi.RSSI()) + " dBm";
   if (!portal_mode && homekit::paired()) h += "<br>Paired with Apple Home.";
   h += "</p>";
+  h += updater::status_html();
   if (!portal_mode && !homekit::paired()) h += code_box();
   h += "<p class=m>";
   h += "<br><a href=/settings>Device settings</a> &middot; <a href=/api/data>/api/data</a>"
@@ -505,6 +515,30 @@ static String code_box() {
 
 // Puts the 6-digit PIN on the device's screen for a minute. Readings pause
 // for that minute, so it only happens on request and once after boot.
+// Updates: GET /api/update for the state; POST action=check|install and/or
+// auto=0|1 (the status and settings pages post the same to /update).
+static void apply_update_request() {
+  if (server.hasArg("auto")) updater::set_auto_install(server.arg("auto") == "1");
+  String a = server.arg("action");
+  if (a == "check" || a == "install") updater::request(a == "install");
+}
+
+static void handle_api_update() {
+  if (server.method() == HTTP_POST) {
+    if (!authorized()) return;
+    apply_update_request();
+  }
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", updater::status_json());
+}
+
+static void handle_update_form() {
+  if (!authorized()) return;
+  apply_update_request();
+  server.sendHeader("Location", server.arg("back") == "/settings" ? "/settings?saved=1" : "/");
+  server.send(303);
+}
+
 static void handle_show_code() {
   if (!portal_mode && !authorized()) return;
   gd32::show_pin(homekit::setup_pin(), 60000);
@@ -601,6 +635,8 @@ static void start_web() {
   server.on("/api/history", handle_history);
   server.on("/settings", handle_settings_page);
   server.on("/show-code", HTTP_POST, handle_show_code);
+  server.on("/api/update", handle_api_update);
+  server.on("/update", HTTP_POST, handle_update_form);
   server.on("/setup", HTTP_GET, handle_setup_page);
   server.on("/setup", HTTP_POST, handle_setup_save);
   server.onNotFound([]() {
@@ -650,8 +686,14 @@ void loop() {
   // The GD32 link and HomeSpan each run in their own task.
   delay(2);
   if (portal_mode) dns.processNextRequest();
-  if (!web_started && homekit::network_ready()) start_web();
+  if (!web_started && homekit::network_ready()) {
+    start_web();
+    updater::begin();
+  }
   if (web_started) server.handleClient();
+  // A freshly updated image confirms itself once the main board answers and
+  // the network (or the setup portal) is up; otherwise it rolls back.
+  updater::loop(gd32::online() && (homekit::network_ready() || portal_mode));
 
   // Not paired yet (or setting up): show the PIN on the device's screen once,
   // so the setup code can be read without a browser or a serial cable.

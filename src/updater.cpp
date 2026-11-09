@@ -125,21 +125,26 @@ struct Clients {
   WiFiClient plain;
 };
 
-static bool http_get(HTTPClient &http, Clients &c, const String &url) {
+// The HTTP status, or a negative HTTPClient error when there was no answer.
+static int http_get(HTTPClient &http, Clients &c, const String &url) {
   c.tls.setInsecure();
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   http.setTimeout(15000);
   http.setUserAgent("htram-fw/" HTRAM_FW_VERSION);
   WiFiClient &client = url.startsWith("https://") ? c.tls : c.plain;
-  if (!http.begin(client, url)) return false;
-  return http.GET() == HTTP_CODE_OK;
+  if (!http.begin(client, url)) return HTTPC_ERROR_CONNECTION_REFUSED;
+  return http.GET();
 }
 
 static bool fetch_manifest(Manifest &m, String &err) {
   Clients client;
   HTTPClient http;
-  if (!http_get(http, client, MANIFEST_URL)) {
-    err = "cannot reach GitHub";
+  int code = http_get(http, client, MANIFEST_URL);
+  if (code != HTTP_CODE_OK) {
+    // 404: the newest published release predates updates (or has none yet).
+    err = code == HTTP_CODE_NOT_FOUND ? String("the latest release has no update manifest")
+          : code < 0                  ? "cannot reach GitHub (" + HTTPClient::errorToString(code) + ")"
+                                      : "GitHub answered HTTP " + String(code);
     http.end();
     return false;
   }
@@ -169,7 +174,7 @@ static void install(const Manifest &m) {
   Clients client;
   HTTPClient http;
   set_state("downloading");
-  if (!http_get(http, client, m.url) || http.getSize() != (int)m.size) {
+  if (http_get(http, client, m.url) != HTTP_CODE_OK || http.getSize() != (int)m.size) {
     http.end();
     return set_state("error", "download of " + m.version + " failed");
   }

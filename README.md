@@ -97,6 +97,7 @@ backup restores the original firmware at any time.
 | `GET /metrics` | Prometheus text format, including risk level and thresholds |
 | `GET /api/diag` | firmware version, uptime, reset reason, Wi-Fi, link counters, clock sync |
 | `GET /api/update` | update state: current and latest version, progress, provisional or confirmed; `POST action=check\|install`, `auto=0\|1` |
+| `POST /api/factory-reset` | with `confirm=erase`: erases Wi-Fi, passwords, Apple Home pairing and all settings, restarts into HTRAM-Setup; the firmware stays (also in Device settings) |
 | `/` | status page with a 24 h chart and the Apple Home setup code |
 | `/settings` | device settings form |
 | `/setup` | change Wi-Fi credentials |

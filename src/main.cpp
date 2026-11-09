@@ -30,6 +30,7 @@
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <nvs_flash.h>
 
 #include "device.h"
 #include "gd32_link.h"
@@ -305,6 +306,11 @@ static void handle_settings_page() {
   h += "<p class=m>Serial " + escape(s.serial) + " &middot; main board firmware " + escape(s.firmware) +
        " &middot; clock " + (s.clock_synced_at ? "synced" : "not synced yet") +
        "<br><a href=/>Back</a> &middot; <a href=/api/history?minutes=1440&format=csv>last 24 h as CSV</a></p>";
+
+  h += "<form method=POST action=/api/factory-reset onsubmit=\"return confirm('Erase Wi-Fi, passwords and "
+       "the Apple Home pairing, and restart into HTRAM-Setup?')\"><input type=hidden name=confirm value=erase>"
+       "<button style='background:#a33'>Factory reset</button></form><p class=m>Keeps the firmware. "
+       "Remove the accessory from the Home app as well.</p>";
   server.send(200, "text/html", h);
 }
 
@@ -539,6 +545,25 @@ static void handle_update_form() {
   server.send(303);
 }
 
+// Erases everything this unit has stored (the whole nvs partition: Wi-Fi,
+// admin password, Apple Home pairing and keys, update state) and restarts,
+// so it comes up like a freshly flashed one, in the setup portal. The
+// firmware stays. POST confirm=erase.
+static void handle_factory_reset() {
+  if (!authorized()) return;
+  if (server.arg("confirm") != "erase") {
+    server.send(400, "text/plain", "add confirm=erase");
+    return;
+  }
+  String h = PAGE_HEAD;
+  h += "<title>HTRAM</title><h1>Reset</h1><p>Everything is erased. The monitor restarts and opens the "
+       "<b>HTRAM-Setup</b> network (password <b>htram-setup</b>) to be set up again.</p>";
+  server.send(200, "text/html", h);
+  delay(1500);  // let the page reach the browser
+  nvs_flash_erase();
+  ESP.restart();
+}
+
 static void handle_show_code() {
   if (!portal_mode && !authorized()) return;
   gd32::show_pin(homekit::setup_pin(), 60000);
@@ -637,6 +662,7 @@ static void start_web() {
   server.on("/show-code", HTTP_POST, handle_show_code);
   server.on("/api/update", handle_api_update);
   server.on("/update", HTTP_POST, handle_update_form);
+  server.on("/api/factory-reset", HTTP_POST, handle_factory_reset);
   server.on("/setup", HTTP_GET, handle_setup_page);
   server.on("/setup", HTTP_POST, handle_setup_save);
   server.onNotFound([]() {

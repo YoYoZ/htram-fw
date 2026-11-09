@@ -13,7 +13,8 @@ What it does, and why it is careful:
 1. Downloads the latest release image and checks it against SHA256SUMS.
 2. Puts the ESP32 into download mode: the C3 bridge holds IO0 low by itself,
    any other adapter needs IO0 grounded. Then you power-cycle the monitor.
-3. Backs up the stock flash (4 MB, ~6 min), verified by esptool's MD5.
+3. Backs up the stock flash (4 MB, ~7 min) in 16 blocks, each verified by
+   esptool's MD5; it resumes after a power cut, even across reruns.
 4. Writes the image.
 5. Releases IO0, has you power-cycle once more and checks the boot log.
 6. Prints this unit's setup network, address, HomeKit code and OTA password.
@@ -27,7 +28,7 @@ does not, asks for a power-cycle and waits for the boot ROM to say it is in
 download mode again. Speed is fixed at 115200 and esptool never toggles
 DTR/RTS: the C3 bridge runs at a fixed baud and has no reset lines.
 """
-import argparse, hashlib, io, json, os, re, subprocess, sys, tempfile, time, urllib.request, zipfile
+import argparse, hashlib, io, json, os, re, subprocess, sys, tempfile, threading, time, urllib.request, zipfile
 
 try:
     import serial
@@ -46,6 +47,46 @@ def say(msg=""):
 
 def step(msg):
     say(f"\n== {msg}")
+
+
+TTY = sys.stdout.isatty()
+
+
+class Bar:
+    """One progress line: bar, percent, speed, time left. Redrawn in place on
+    a terminal; when the output is a file or pipe, a line every 10 %."""
+
+    def __init__(self, total_bytes, done=0.0):
+        self.total, self.start_frac = total_bytes, done
+        self.t0, self.last_draw, self.last_decile = time.time(), 0.0, -1
+        self.frac = done
+
+    def update(self, frac):
+        self.frac = max(self.frac, min(frac, 1.0))
+        now = time.time()
+        if TTY and now - self.last_draw < 0.25 and self.frac < 1.0:
+            return
+        self.last_draw = now
+        gained, spent = self.frac - self.start_frac, now - self.t0
+        rate = gained * self.total / spent if spent > 1 and gained > 0 else 0
+        left = (1 - self.frac) * self.total / rate if rate else None
+        filled = int(self.frac * 30)
+        line = (f"   [{'#' * filled}{'.' * (30 - filled)}] {self.frac * 100:5.1f}%"
+                f"  {rate / 1024:5.1f} KB/s" + (f"  {int(left) // 60}:{int(left) % 60:02d} left" if left else ""))
+        if TTY:
+            print("\r" + line + "   ", end="", flush=True)
+        elif int(self.frac * 10) != self.last_decile:
+            self.last_decile = int(self.frac * 10)
+            print(line, flush=True)
+
+    def interrupt(self):
+        """Ends the line before something else is printed."""
+        if TTY:
+            print(flush=True)
+
+    def done(self):
+        self.update(1.0)
+        self.interrupt()
 
 
 # --------------------------------------------------------------------------
@@ -70,23 +111,44 @@ def cmd(name):  # esptool 5 spells commands and options with hyphens
     return name.replace("_", "-") if V5 else name
 
 
-def esptool(port, *args, quiet=False):
+def esptool(port, *args, quiet=False, timeout=None, progress=None):
+    """Runs esptool; (returncode, output). Killed after `timeout` seconds: a
+    chip whose power was cut mid-transfer otherwise leaves esptool waiting.
+    `progress` gets esptool's percentage (0-100) as it goes; with it, esptool's
+    own chatter is not printed."""
+    if progress:
+        quiet = True
     argv = [sys.executable, "-m", "esptool", "--chip", "esp32", "--port", port,
             "--baud", str(BAUD), "--before", cmd("no_reset"), "--after", cmd("no_reset"),
             "--connect-attempts", "3", *args]
     p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     out = []
-    for line in p.stdout:
-        out.append(line)
-        if not quiet and not re.match(r"\s*(Writing at|Read \d+ bytes at|\d+ \()", line):
-            print("   " + line.rstrip(), flush=True)
-    p.wait()
+
+    def pump():
+        for line in p.stdout:
+            out.append(line)
+            m = re.search(r"\((\d+) ?%\)", line)
+            if m and progress:
+                progress(int(m.group(1)))
+            elif not quiet and not re.match(r"\s*(Writing at|Read \d+ bytes at|\d+ \()", line):
+                print("   " + line.rstrip(), flush=True)
+
+    t = threading.Thread(target=pump, daemon=True)
+    t.start()
+    try:
+        p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+        t.join(2)
+        return -1, "".join(out) + "\n[timed out]\n"
+    t.join(5)
     return p.returncode, "".join(out)
 
 
 def chip_answers(port):
     """MAC address if a chip in download mode answers, else None."""
-    rc, out = esptool(port, cmd("read_mac"), quiet=True)
+    rc, out = esptool(port, cmd("read_mac"), quiet=True, timeout=40)
     if "Wrong --chip" in out or "This chip is" in out:
         sys.exit("The chip that answered is not an ESP32, so this is not an HTRAM:\n" + out)
     if rc != 0:
@@ -140,31 +202,106 @@ def release_io0(port, have_bridge):
         input("   Press Enter when done. ")
 
 
+dm_since = 0.0  # when the chip last entered download mode; 0 = unknown
+
+
 def wait_for_download_mode(port, why):
     """Has the user power-cycle the monitor and waits for the boot ROM."""
+    global dm_since
     say(f"   {why}")
     say("   >>> Power-cycle the monitor now: off, then hold its button ~2 s. <<<")
     with open_port(port) as s:
-        buf, end = b"", time.time() + 300
-        while time.time() < end:
+        buf, t0, shown = b"", time.time(), -1
+        while time.time() - t0 < 300:
             buf += s.read(4096)
+            waited = int(time.time() - t0)
+            if TTY and waited != shown:  # a ticking clock, so it never looks frozen
+                shown = waited
+                print(f"\r   waiting for the ESP32 to start... {waited // 60}:{waited % 60:02d}", end="", flush=True)
             if b"waiting for download" in buf:
+                dm_since = time.time()
+                if TTY:
+                    print()
                 say("   Download mode confirmed.")
                 return
             if b"SPI_FAST_FLASH_BOOT" in buf:
+                if TTY:
+                    print()
                 sys.exit("   It booted normally: IO0 was not low. Check the IO0 wire and run again.")
+    if TTY:
+        print()
     sys.exit("   Nothing heard in 5 minutes. Check TX/RX (try swapping them) and GND, then run again.")
 
 
-def ensure_download_mode(port, why):
-    """Returns the MAC once the chip answers, power-cycling as often as needed."""
-    mac = chip_answers(port)
+def ensure_download_mode(port, why, fresh=False):
+    """Returns the MAC once the chip answers, power-cycling as often as needed.
+    `fresh` insists on a new power-cycle even if it answers now."""
+    if not fresh:
+        say("   Checking that the ESP32 answers...")
+    mac = None if fresh else chip_answers(port)
     while not mac:
         wait_for_download_mode(port, why)
+        say("   Checking that the ESP32 answers...")
         mac = chip_answers(port)
         if not mac:
             why = "The ROM said it was in download mode but did not answer; once more."
     return mac
+
+
+# --------------------------------------------------------------------------
+# Backup
+#
+# A 4 MB read takes about 6.5 minutes at 115200 baud, longer than the main
+# board leaves the ESP32 powered in download mode (4-6 minutes, varies by
+# unit). So it is read in 256 KB blocks of ~25 s each; when a block fails the
+# user power-cycles and the backup carries on from that block. Blocks that
+# made it are kept on disk, so even a rerun of the script resumes.
+# --------------------------------------------------------------------------
+CHUNK = 0x40000
+FRESH_S = 60  # older download mode than this gets a power-cycle before writing
+
+
+def same_chip(mac, now):
+    if now != mac:
+        sys.exit(f"   A different chip answered ({now}, was {mac}). Stopping.")
+
+
+def backup(port, mac, path):
+    if os.path.exists(path) and os.path.getsize(path) == FLASH_SIZE:
+        say(f"   {path} already exists, keeping it.")
+        return
+    parts = path + ".parts"
+    os.makedirs(parts, exist_ok=True)
+    n = FLASH_SIZE // CHUNK
+    have = lambda i: os.path.exists(os.path.join(parts, f"{i:02d}.bin")) and \
+        os.path.getsize(os.path.join(parts, f"{i:02d}.bin")) == CHUNK
+    kept = sum(have(i) for i in range(n))
+    if kept:
+        say(f"   Resuming: {kept} of {n} blocks are already on disk.")
+    bar = Bar(FLASH_SIZE, kept / n)
+    for i in range(n):
+        f = os.path.join(parts, f"{i:02d}.bin")
+        while not have(i):
+            rc, out = esptool(port, cmd("read_flash"), hex(i * CHUNK), hex(CHUNK), f, timeout=120,
+                              progress=lambda pct, i=i: bar.update((i + pct / 100) / n))
+            if rc == 0 and have(i):
+                break
+            if os.path.exists(f):
+                os.remove(f)
+            bar.interrupt()
+            same_chip(mac, ensure_download_mode(
+                port, f"The ESP32 went quiet at block {i + 1}/{n} (power cut or a stalled transfer). "
+                      "The backup carries on from this block."))
+            bar = Bar(FLASH_SIZE, i / n)  # speed restarts after the pause
+        bar.update((i + 1) / n)
+    bar.done()
+    with open(path, "wb") as out:
+        for i in range(n):
+            f = os.path.join(parts, f"{i:02d}.bin")
+            out.write(open(f, "rb").read())
+            os.remove(f)
+    os.rmdir(parts)
+    say(f"   Saved {path} (each block MD5-checked by esptool). Keep it: it is the only way back.")
 
 
 # --------------------------------------------------------------------------
@@ -248,6 +385,7 @@ def main():
     ap.add_argument("--out", default=".", help="where to save the backup (default: current folder)")
     ap.add_argument("--image", help="flash this -full.bin or -parts.zip instead of the latest release")
     a = ap.parse_args()
+    global dm_since
 
     port = a.port
     if not port:
@@ -256,6 +394,8 @@ def main():
         port = input("COM port of your adapter: ").strip()
         if not port:
             sys.exit("No port given.")
+    if port.isdigit() and os.name == "nt":
+        port = "COM" + port  # "19" means COM19
 
     if a.image:
         tag, name, image = local_image(a.image)
@@ -277,26 +417,27 @@ def main():
     say(f"   ESP32 answers, MAC {mac}")
 
     if not a.no_backup:
-        step("Backing up the stock flash (about 6 minutes)")
-        path = os.path.join(a.out, f"htram-backup-{mac.replace(':', '')}.bin")
-        if os.path.exists(path) and os.path.getsize(path) == FLASH_SIZE:
-            say(f"   {path} already exists, keeping it.")
-        else:
-            rc, out = esptool(port, cmd("read_flash"), "0", hex(FLASH_SIZE), path)
-            if rc != 0 or os.path.getsize(path) != FLASH_SIZE:
-                sys.exit("   Backup failed; nothing was written. Run again.")
-            say(f"   Saved {path} (MD5 checked by esptool). Keep it: it is the only way back.")
+        step("Backing up the stock flash (about 7 minutes, in 16 blocks)")
+        backup(port, mac, os.path.join(a.out, f"htram-backup-{mac.replace(':', '')}.bin"))
 
-    step(f"Writing {name}")
-    # The GD32 may have cut the ESP32's power during the backup.
-    mac2 = ensure_download_mode(port, "The ESP32 stopped answering after the backup (the main board cut "
-                                      "its power); one more power-cycle.")
-    if mac2 != mac:
-        sys.exit(f"   A different chip answered ({mac2}, was {mac}). Stopping.")
-    with tempfile.TemporaryDirectory() as tmp:
-        rc, out = esptool(port, cmd("write_flash"), "-z", *write_args(name, image, tmp))
-    if rc != 0 or "Hash of data verified" not in out:
-        sys.exit("   Writing failed. The unit is safe to retry: run the script again "
+    step(f"Writing {name} (about 1-2 minutes)")
+    for attempt in range(3):
+        # Start every write on a freshly powered chip, so the main board's
+        # power cut cannot land in the middle of it.
+        if time.time() - dm_since > FRESH_S:
+            same_chip(mac, ensure_download_mode(
+                port, "Fresh power-cycle first, so the write gets the full window.", fresh=True))
+        with tempfile.TemporaryDirectory() as tmp:
+            bar = Bar(len(image))
+            rc, out = esptool(port, cmd("write_flash"), "-z", *write_args(name, image, tmp), timeout=400,
+                              progress=lambda pct: bar.update(pct / 100))
+            bar.interrupt()
+        if rc == 0 and "Hash of data verified" in out:
+            break
+        say("   The write was interrupted; that is safe, it starts over.")
+        dm_since = 0.0
+    else:
+        sys.exit("   Writing failed three times. Check the wires and power, then run again "
                  "(download mode lives in mask ROM, it cannot be lost).")
     say("   Written and verified.")
 
@@ -314,15 +455,19 @@ def main():
         else:
             say("   It boots from flash.")
 
+    # Per-unit names arrived in 1.3.0; older images all call themselves "htram".
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", name)
+    v = tuple(map(int, m.groups())) if m else (0, 0, 0)
+    host, home = (u["host"], "HTRAM " + u["host"][-4:]) if v >= (1, 3, 0) else ("htram", "HTRAM")
     step("Done")
     if a.keep_settings:
-        say(f"   It rejoins your Wi-Fi as http://{u['host']}.local and keeps its Apple Home pairing.")
+        say(f"   It rejoins your Wi-Fi as http://{host}.local and keeps its Apple Home pairing.")
     else:
         say("   On your phone, join the Wi-Fi network  HTRAM-Setup  (password  htram-setup);")
         say("   the setup page opens by itself (or http://192.168.4.1). Pick your network there.")
-        say(f"   Afterwards:        http://{u['host']}.local")
+        say(f"   Afterwards:        http://{host}.local")
     say(f"   Apple Home code:   {u['code']}   (the screen can show {u['pin']})")
-    say(f"   Name in Home app:  HTRAM {u['host'][-4:]}")
+    say(f"   Name in Home app:  {home}")
     say(f"   OTA password:      {u['ota']}   (until you set an admin password)")
     say("   You can unsolder the wires: later updates go over Wi-Fi.")
 

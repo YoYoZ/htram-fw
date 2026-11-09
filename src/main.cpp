@@ -25,6 +25,8 @@
 // restored at any time from a backup of the module's flash.
 
 #include <Arduino.h>
+#include <algorithm>
+#include <vector>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
@@ -571,6 +573,55 @@ static void handle_show_code() {
   server.send(303);
 }
 
+// The networks in range as a real <select>: a <datalist> is only a suggestion
+// list, and phones (the captive-portal browser above all) show few or none of
+// its entries. Each name once at its strongest, strongest first, without
+// other monitors' setup networks, plus "Other" for a hidden or far network,
+// typed into the field below; that field wins when filled, so the form also
+// works without JavaScript. Scanning takes a couple of seconds.
+static String network_picker() {
+  struct Net {
+    String ssid;
+    int rssi;
+    bool open;
+  };
+  std::vector<Net> nets;
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++) {
+    String s = WiFi.SSID(i);
+    if (!s.length() || s == SETUP_SSID) continue;
+    auto it = std::find_if(nets.begin(), nets.end(), [&](const Net &x) { return x.ssid == s; });
+    if (it == nets.end()) nets.push_back({s, WiFi.RSSI(i), WiFi.encryptionType(i) == WIFI_AUTH_OPEN});
+    else it->rssi = max(it->rssi, (int)WiFi.RSSI(i));
+  }
+  WiFi.scanDelete();
+  std::sort(nets.begin(), nets.end(), [](const Net &a, const Net &b) { return a.rssi > b.rssi; });
+
+  bool saved_in_range = false;
+  String o;
+  for (const Net &x : nets) {
+    const char *bars = x.rssi >= -55 ? "&#9602;&#9604;&#9606;&#9608;" : x.rssi >= -67 ? "&#9602;&#9604;&#9606;"
+                     : x.rssi >= -78 ? "&#9602;&#9604;" : "&#9602;";
+    bool sel = x.ssid == wifi_ssid;
+    saved_in_range |= sel;
+    o += "<option value=\"" + escape(x.ssid) + "\"" + (sel ? " selected>" : ">") + escape(x.ssid) + "  " +
+         bars + (x.open ? "  (open)" : "") + "</option>";
+  }
+  String h = "<label>Wi-Fi network</label><select name=ssid id=ssid "
+             "style='width:100%;padding:.5rem;margin:.3rem 0 .9rem' onchange=\"other.style.display="
+             "this.value?'none':'block'\">";
+  if (nets.empty()) h += "<option value=\"\">No networks found</option>";
+  h += o + "<option value=\"\"" + String(nets.empty() || (wifi_ssid.length() && !saved_in_range) ? " selected" : "") +
+       ">Other network&hellip;</option></select>";
+  h += "<div id=other><label>Network name <span class=m>(if not in the list)</span></label>"
+       "<input name=ssid_other autocomplete=off value=\"" +
+       (saved_in_range ? String() : escape(wifi_ssid)) + "\"></div>";
+  // Hide the name field while a listed network is chosen (it still works with JS off).
+  h += "<script>other.style.display=ssid.value?'none':'block'</script>";
+  h += "<p class=m><a href=/setup>Scan again</a></p>";
+  return h;
+}
+
 // In the setup portal the access point itself is the protection (its password
 // is the admin password once one is set); on the home network the page asks.
 static void handle_setup_page() {
@@ -578,13 +629,8 @@ static void handle_setup_page() {
   String h = PAGE_HEAD;
   h += "<title>HTRAM Wi-Fi</title><h1>Transmission Risk Air Monitor</h1>";
   h += code_box();
-  h += "<form method=POST action=/setup><label>Wi-Fi network</label>"
-       "<input name=ssid list=nets autocomplete=off value=\"" + escape(wifi_ssid) + "\"><datalist id=nets>";
-  // Offer what is in range. Takes a couple of seconds; fine for a setup page.
-  int n = WiFi.scanNetworks();
-  for (int i = 0; i < n && i < 20; i++) h += "<option value=\"" + escape(WiFi.SSID(i)) + "\">";
-  WiFi.scanDelete();
-  h += "</datalist><label>Password</label><input name=pass type=password>";
+  h += "<form method=POST action=/setup>" + network_picker();
+  h += "<label>Password</label><input name=pass type=password>";
   h += "<label>Admin password <span class=m>(optional, 8+ characters)</span></label>"
        "<input name=admin type=password autocomplete=new-password>";
   if (admin_pass.length())
@@ -600,7 +646,10 @@ static void handle_setup_page() {
 
 static void handle_setup_save() {
   if (!portal_mode && !authorized()) return;
-  String ssid = server.arg("ssid");
+  // A typed name wins over the list (see network_picker()).
+  String ssid = server.arg("ssid_other");
+  ssid.trim();
+  if (!ssid.length()) ssid = server.arg("ssid");
   String pass = server.arg("pass");
   String admin = server.arg("admin");
   if (!ssid.length()) {
@@ -717,9 +766,13 @@ void loop() {
     updater::begin();
   }
   if (web_started) server.handleClient();
-  // A freshly updated image confirms itself once the main board answers and
-  // the network (or the setup portal) is up; otherwise it rolls back.
-  updater::loop(gd32::online() && (homekit::network_ready() || portal_mode));
+  // A freshly updated image confirms itself once the main board has actually
+  // answered a reading in the last 30 s (an established but silent link is
+  // not enough) and the network or the setup portal is up; otherwise it
+  // rolls back after 5 minutes.
+  Reading r = gd32::reading();
+  bool answering = r.valid && millis() - r.millis_at < 30000;
+  updater::loop(answering && (homekit::network_ready() || portal_mode));
 
   // Not paired yet (or setting up): show the PIN on the device's screen once,
   // so the setup code can be read without a browser or a serial cable.

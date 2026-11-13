@@ -3,5 +3,5 @@
 #pragma once
 
 #ifndef HTRAM_FW_VERSION  // test builds pass their own with -D
-#define HTRAM_FW_VERSION "1.4.2"
+#define HTRAM_FW_VERSION "1.4.3"
 #endif

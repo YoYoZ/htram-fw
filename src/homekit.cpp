@@ -2,6 +2,7 @@
 
 #include <HomeSpan.h>
 #include <Preferences.h>
+#include <WiFi.h>
 
 #include "device.h"
 #include "gd32_link.h"
@@ -259,6 +260,9 @@ void begin(const String &ssid, const String &pass, const String &serial, const S
   static String name, host;
   name = "HTRAM " + unit_id();
   host = hostname();
+  // The same name for DHCP, so the router's lease list shows htram-xxxx
+  // instead of the ESP32's default esp32-xxxxxx. Must precede Wi-Fi start.
+  WiFi.setHostname(host.c_str());
   homeSpan.begin(Category::Bridges, name.c_str(), host.c_str(), "HTRAM-V1-W");
   started = true;
 

@@ -87,6 +87,20 @@ static String escape(const String &in) {
 
 static String code_box();
 
+// For a query string: everything but letters, digits and -_.~ as %XX.
+static String url_encode(const String &in) {
+  String out;
+  for (unsigned char c : in) {
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += (char)c;
+    else {
+      char b[4];
+      snprintf(b, sizeof(b), "%%%02X", c);
+      out += b;
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Access control
 //
@@ -254,7 +268,7 @@ static void handle_settings_page() {
   if (server.method() == HTTP_POST) {
     if (!authorized()) return;
     String err = apply_settings();
-    server.sendHeader("Location", err.length() ? "/settings?error=" + err : String("/settings?saved=1"));
+    server.sendHeader("Location", err.length() ? "/settings?error=" + url_encode(err) : String("/settings?saved=1"));
     server.send(303);
     return;
   }
@@ -262,7 +276,10 @@ static void handle_settings_page() {
   String h = PAGE_HEAD;
   h += "<title>HTRAM settings</title><h1>Device settings</h1>";
   if (server.hasArg("saved")) h += "<p class=m>Saved.</p>";
-  if (server.hasArg("error")) h += "<p class=m>" + escape(server.arg("error")) + "</p>";
+  if (server.hasArg("error"))
+    h += "<p class=m><b>Not saved:</b> " + escape(server.arg("error")) +
+         "<br>The monitor did not confirm the change. It ignores changes for about 40 seconds while it "
+         "shows its PIN, and briefly after a restart; try again in a minute.</p>";
   if (!s.valid) {
     h += "<p>Waiting for the main board&hellip;</p>";
     server.send(200, "text/html", h);
@@ -774,10 +791,13 @@ void loop() {
   bool answering = r.valid && millis() - r.millis_at < 30000;
   updater::loop(answering && (homekit::network_ready() || portal_mode));
 
-  // Not paired yet (or setting up): show the PIN on the device's screen once,
-  // so the setup code can be read without a browser or a serial cable.
+  // In the setup portal, show the PIN on the device's screen once, so the
+  // setup code can be read without a browser or a serial cable. Only there:
+  // the main board ignores the link for about 40 s while its PIN screen is
+  // up, so doing this on every boot of an unpaired unit made the settings
+  // page fail right after Wi-Fi setup. The button still shows it any time.
   static bool pin_shown_at_boot = false;
-  if (!pin_shown_at_boot && gd32::online() && (portal_mode || !homekit::paired())) {
+  if (!pin_shown_at_boot && gd32::online() && portal_mode) {
     pin_shown_at_boot = true;
     gd32::show_pin(homekit::setup_pin(), 60000);
   }

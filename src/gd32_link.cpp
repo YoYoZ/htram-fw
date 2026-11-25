@@ -73,6 +73,13 @@ static const uint32_t BINARY_TIMEOUT_MS = 500;
 // If no setup commands arrive this long after our "ready", it is already
 // configured, so go straight to connecting a client.
 static const uint32_t SETUP_WAIT_MS = 4000;
+// A client write the GD32 has not answered yet blocks the next one for this
+// long. The phone app never had two requests outstanding; the GD32 answers in
+// ~20-50 ms.
+static const uint32_t IN_FLIGHT_MS = 1000;
+// Reconnects in a row that drew no bytes at all from the GD32 before the
+// serial port itself is reinitialised.
+static const uint8_t SILENT_RELINKS_BEFORE_UART_RESTART = 2;
 
 enum Phase { PHASE_BOOT, PHASE_ADVERTISING, PHASE_PAIRING, PHASE_READY };
 
@@ -85,6 +92,11 @@ static uint32_t last_reply = 0;
 static uint32_t last_resubscribe = 0;
 static uint32_t ready_sent_at = 0;
 static uint32_t last_command_at = 0;
+static uint32_t last_rx = 0;            // any byte from the GD32
+static bool in_flight = false;          // a client write is waiting for its reply
+static uint32_t in_flight_since = 0;
+static uint8_t silent_relinks = 0;      // reconnects in a row the GD32 did not react to
+static volatile bool relink_requested = false;  // set by other tasks, acted on by the link task
 
 // A 6-digit number to put on the device's screen. The GD32 was set up as a
 // display-only pairing peer and shows the passkey ESP-AT reports during
@@ -135,6 +147,29 @@ static void announce_ready() {
   connect_at = pair_at = 0;
   last_reply = ready_sent_at = millis();
   last_command_at = 0;
+  in_flight = false;
+}
+
+static void open_uart() {
+  AT.setRxBufferSize(1024);  // must precede begin() to take effect
+  AT.begin(115200, SERIAL_8N1, HTRAM_RX_PIN, HTRAM_TX_PIN);
+#if HTRAM_RTS_PIN >= 0
+  AT.setPins(-1, -1, -1, HTRAM_RTS_PIN);
+  AT.setHwFlowCtrlMode(UART_HW_FLOWCTRL_RTS, 64);
+#endif
+}
+
+// Last resort when the GD32 has sent nothing at all through several client
+// reconnects (each of which it normally answers at once with AT+BLECFGMTU? and
+// AT+BLEENC): tear the serial driver down and set it up again, in case it is
+// our receive side that has stalled rather than the GD32.
+static void restart_uart() {
+  AT.end();
+  open_uart();
+  line = "";
+  frame_want = frame_got = 0;
+  in_flight = false;
+  counters.uart_restarts++;
 }
 
 // The GD32 does not parse the passkey line: it shows the six bytes at offset
@@ -169,6 +204,7 @@ static void reconnect_client() {
   phase = PHASE_ADVERTISING;
   connect_at = millis() + 1500;
   last_reply = millis();
+  in_flight = false;
 }
 
 // Reports a client that connected, finished pairing and turned on notifications
@@ -187,8 +223,12 @@ static void report_client_subscribed() {
   AT.print("\r\n");
   phase = PHASE_READY;
   next_poll = millis();
-  last_reply = millis();
   last_resubscribe = millis();
+  in_flight = false;
+  // Deliberately leaves last_reply alone. It used to reset it here, and the
+  // 45 s resubscribe below calls this, so a link that had gone quiet was
+  // resubscribed every 45 s forever and never got as far as the 90 s
+  // reconnect. Whoever brings a fresh link up resets last_reply themselves.
 }
 
 // Hands the GD32 a frame as if the client had written it to Write-Data.
@@ -196,6 +236,20 @@ static void client_write(const uint8_t *f, size_t n) {
   AT.printf("\r\n+WRITE:0,2,2,,%u,", (unsigned)n);
   AT.write(f, n);
   AT.print("\r\n");
+  in_flight = true;
+  in_flight_since = millis();
+}
+
+// True while the GD32 is mid-way through answering: a write of ours not yet
+// answered, a command line half received, or notification bytes being
+// collected. A new write is held back until then; the phone app never had
+// two outstanding either, and the GD32 is not known to cope with it.
+static bool link_busy() {
+  if (frame_want) return true;  // has its own BINARY_TIMEOUT_MS
+  // A half-received line counts only while bytes are still arriving, so a
+  // stray fragment without a line break cannot hold the link up for good.
+  if (line.length() && since(last_rx) < (int32_t)IN_FLIGHT_MS) return true;
+  return in_flight && since(in_flight_since) < (int32_t)IN_FLIGHT_MS;
 }
 
 static void request_reading() {
@@ -218,6 +272,8 @@ static void parse_frame(const uint8_t *f, size_t n) {
   }
   uint16_t cmd = ((uint16_t)f[4] << 8) | f[5];
   last_reply = millis();  // any well-formed frame proves the link is alive
+  in_flight = false;
+  silent_relinks = 0;
 
   if (tx_sent && cmd == tx_expect) {
     memcpy(rx_frame, f, n);
@@ -272,6 +328,14 @@ static void handle_at(const String &cmd) {
     if (phase == PHASE_BOOT) {
       phase = PHASE_ADVERTISING;
       connect_at = millis() + 800;
+    } else if (phase == PHASE_READY) {
+      // The GD32 went back to advertising behind our back (it reset, or reran
+      // its setup): it no longer considers our client connected and will
+      // ignore its writes. Connect again rather than poll into the void.
+      phase = PHASE_ADVERTISING;
+      connect_at = millis() + 800;
+      in_flight = false;
+      counters.readvertised++;
     }
   } else if (starts_with(cmd, "AT+BLEENC")) {
     send_ok();
@@ -331,12 +395,7 @@ static void link_task(void *) {
 namespace gd32 {
 
 void begin() {
-  AT.setRxBufferSize(1024);  // must precede begin() to take effect
-  AT.begin(115200, SERIAL_8N1, HTRAM_RX_PIN, HTRAM_TX_PIN);
-#if HTRAM_RTS_PIN >= 0
-  AT.setPins(-1, -1, -1, HTRAM_RTS_PIN);
-  AT.setHwFlowCtrlMode(UART_HW_FLOWCTRL_RTS, 64);
-#endif
+  open_uart();
   line.reserve(128);
   transact_mutex = xSemaphoreCreateMutex();
   transact_done = xSemaphoreCreateBinary();
@@ -349,8 +408,10 @@ void show_pin(uint32_t pin, uint32_t hold_ms) {
   pin_value = pin % 1000000;
   pin_hold_ms = hold_ms;
   pin_pending = true;
-  // Already connected: have the client reconnect, which reruns pairing.
-  if (phase == PHASE_READY) reconnect_client();
+  // Already connected: have the client reconnect, which reruns pairing. The
+  // link task does it: this runs in the web server's task, and writing to the
+  // serial port from here could interleave with the link task's own output.
+  relink_requested = true;
 }
 
 size_t build_frame(uint16_t cmd, const uint8_t *payload, size_t n, uint8_t *out) {
@@ -402,6 +463,8 @@ static void service() {
   // Collecting the bytes of a notification the GD32 is in the middle of sending.
   while (frame_want && AT.available()) {
     frame[frame_got++] = AT.read();
+    counters.rx_bytes++;
+    last_rx = millis();
     if (frame_got >= frame_want) {
       parse_frame(frame, frame_got);
       frame_want = frame_got = 0;
@@ -418,6 +481,8 @@ static void service() {
   // Otherwise we are reading AT command lines.
   while (!frame_want && AT.available()) {
     char c = AT.read();
+    counters.rx_bytes++;
+    last_rx = millis();
     if (c == '\n') {
       line.trim();
       if (line.length()) handle_at(line);
@@ -454,27 +519,48 @@ static void service() {
     } else {
       pair_at = 0;
       report_client_subscribed();
+      last_reply = millis();  // a fresh link: give it the full timeouts
     }
   }
 
-  if (phase == PHASE_READY && tx_pending && !frame_want) {
+  // A PIN was asked for from another task.
+  if (relink_requested) {
+    relink_requested = false;
+    if (phase == PHASE_READY) reconnect_client();
+  }
+
+  // One write at a time: the settings/history request from another task, or
+  // the regular reading. Whichever is held back goes out once the GD32 has
+  // answered (or IN_FLIGHT_MS has passed).
+  if (phase == PHASE_READY && tx_pending && !link_busy()) {
     tx_pending = false;
     tx_sent = true;
     client_write(tx_frame, tx_len);
   }
 
-  if (phase == PHASE_READY && since(next_poll) >= 0) {
+  if (phase == PHASE_READY && since(next_poll) >= 0 && !link_busy()) {
     next_poll = millis() + POLL_INTERVAL_MS;
     request_reading();
   }
 
-  // Nothing coming back? Say the client subscribed again, and if that does not
-  // help, have the client drop off and reconnect.
+  // Nothing coming back? Say the client subscribed again; if that does not
+  // help, have the client drop off and reconnect; and if the GD32 does not
+  // even react to that, reinitialise our serial port in case the fault is on
+  // this side. Repeats for as long as the link stays dead.
   if (phase == PHASE_READY && since(last_reply) > (int32_t)RELINK_TIMEOUT_MS) {
+    // The GD32 answers a connecting client at once with AT commands, so no
+    // byte from it since the previous reconnect means it never saw that one.
+    if (silent_relinks >= SILENT_RELINKS_BEFORE_UART_RESTART &&
+        since(last_rx) > (int32_t)RELINK_TIMEOUT_MS) {
+      silent_relinks = 0;
+      restart_uart();
+    }
+    silent_relinks++;
+    counters.relinks++;
     reconnect_client();
   } else if (phase == PHASE_READY && since(last_reply) > (int32_t)REPLY_TIMEOUT_MS &&
              since(last_resubscribe) > (int32_t)REPLY_TIMEOUT_MS) {
-    last_resubscribe = millis();
+    counters.resubscribes++;
     report_client_subscribed();
   }
 }
@@ -498,5 +584,8 @@ String device_name() {
   return String(copy);
 }
 bool online() { return phase == PHASE_READY; }
+
+uint32_t quiet_ms() { return millis() - last_reply; }
+uint32_t silent_ms() { return millis() - last_rx; }
 
 }  // namespace gd32

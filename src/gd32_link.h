@@ -30,6 +30,12 @@ struct LinkStats {
   uint32_t bad_frames = 0;   // replies that failed the length or CRC check
   uint32_t at_commands = 0;  // AT commands answered
   uint32_t unknown = 0;      // AT commands answered with a bare OK
+  // Link recovery, for diagnosing a main board that stops answering.
+  uint32_t rx_bytes = 0;       // bytes received from the GD32
+  uint32_t resubscribes = 0;   // quiet link: reported the client subscribing again
+  uint32_t relinks = 0;        // still quiet: reported the client reconnecting
+  uint32_t uart_restarts = 0;  // GD32 silent even after reconnects: serial port reinitialised
+  uint32_t readvertised = 0;   // GD32 restarted advertising on its own; client reconnected
 };
 
 namespace gd32 {
@@ -51,6 +57,11 @@ String device_name();
 
 // True once the GD32 has finished its boot sequence and accepted our client.
 bool online();
+
+// Milliseconds since the GD32 last sent a well-formed frame, and since it last
+// sent any byte at all. Both count from module start if it never has.
+uint32_t quiet_ms();
+uint32_t silent_ms();
 
 // Asks the GD32 to show a 6-digit number on its screen, as the Bluetooth
 // pairing passkey, for about `hold_ms`. Readings pause meanwhile. If the link

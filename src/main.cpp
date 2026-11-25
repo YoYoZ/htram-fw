@@ -46,6 +46,8 @@ static const char *SETUP_PASS = "htram-setup";
 // the setup portal, and leave the portal again after a while to retry Wi-Fi.
 static const uint32_t WIFI_GIVE_UP_MS = 3UL * 60 * 1000;
 static const uint32_t PORTAL_RETRY_MS = 10UL * 60 * 1000;
+// A reading older than this is flagged as stale (same limit HomeKit uses).
+static const uint32_t STALE_READING_MS = 60000;
 static uint32_t portal_until = 0;  // 0 = stay in the portal (no credentials at all)
 
 static WebServer server(80);
@@ -151,6 +153,8 @@ static void handle_data() {
     j += ",\"battery_percent\":" + String(r.battery * 25);
     j += ",\"charging\":" + String(r.charging ? "true" : "false");
     j += ",\"age_seconds\":" + String((millis() - r.millis_at) / 1000);
+    // The values above are the last ones received; say so when they are old.
+    j += ",\"stale\":" + String(millis() - r.millis_at > STALE_READING_MS ? "true" : "false");
   }
   // The monitor's own "transmission risk": its traffic light under the
   // thresholds for the selected activity level.
@@ -457,7 +461,12 @@ static void handle_diag() {
   j += "},\"homekit_paired\":" + String(homekit::paired() ? "true" : "false");
   j += ",\"link\":{\"online\":" + String(gd32::online() ? "true" : "false");
   j += ",\"requests\":" + String(s.requests) + ",\"replies\":" + String(s.replies);
-  j += ",\"bad_frames\":" + String(s.bad_frames) + ",\"at_commands\":" + String(s.at_commands) + "}";
+  j += ",\"bad_frames\":" + String(s.bad_frames) + ",\"at_commands\":" + String(s.at_commands);
+  j += ",\"rx_bytes\":" + String(s.rx_bytes);
+  j += ",\"seconds_since_frame\":" + String(gd32::quiet_ms() / 1000);
+  j += ",\"seconds_since_any_byte\":" + String(gd32::silent_ms() / 1000);
+  j += ",\"resubscribes\":" + String(s.resubscribes) + ",\"relinks\":" + String(s.relinks);
+  j += ",\"uart_restarts\":" + String(s.uart_restarts) + ",\"readvertised\":" + String(s.readvertised) + "}";
   j += ",\"clock_synced\":" + String(ds.clock_synced_at ? "true" : "false");
   if (ds.clock_synced_at) j += ",\"clock_synced_seconds_ago\":" + String((millis() - ds.clock_synced_at) / 1000);
   j += ",\"main_board_firmware\":\"" + ds.firmware + "\"}";
@@ -475,6 +484,9 @@ static void handle_root() {
   } else if (!r.valid) {
     h += "<tr><td colspan=2>Connected, no reading yet.</td></tr>";
   } else {
+    if (millis() - r.millis_at > STALE_READING_MS)
+      h += "<tr><td colspan=2><b>The main board has stopped answering.</b> These are the last values received, " +
+           String((millis() - r.millis_at) / 60000) + " min ago; reconnecting.</td></tr>";
     h += "<tr><td>CO&#8322;</td><td>";
     h += r.warming_up ? String("sensor warming up") : String(r.co2) + " ppm";
     h += "</td></tr>";
